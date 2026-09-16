@@ -1,7 +1,11 @@
-set(CMAKE_C_COMPILER "/root/upmem-2023.2.0-Linux-x86_64/bin/dpu-upmem-dpurte-clang")
-set(CMAKE_C_FLAGS "-w -I/root/uPIMulator/benchmark/BS/support -O2 -S -DNR_TASKLETS=${NR_TASKLETS}")
+# The DPU compiler comes from the installed UPMEM SDK. Override with -DDPU_CC=<path>.
+if(NOT DPU_CC)
+  set(DPU_CC "dpu-upmem-dpurte-clang")
+endif()
+set(CMAKE_C_COMPILER "${DPU_CC}")
+set(CMAKE_C_FLAGS "-w -I${CMAKE_CURRENT_SOURCE_DIR}/../support -O2 -S -g0 -DNR_TASKLETS=${NR_TASKLETS}")
 
 file(GLOB_RECURSE SRCS *.c)
 
-add_executable(BS_device ${SRCS})
+add_library(BS_device OBJECT ${SRCS})
 
