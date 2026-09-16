@@ -1,0 +1,103 @@
+#!/bin/bash
+# upimulator -- run a compiled UPMEM host program against the simulator.
+#
+#   upimulator run --program-dir DIR --tasklets N [options] -- ./host args...
+#
+# The host binary is not modified or rebuilt. LD_PRELOAD puts libdpusim in front
+# of libdpu, so every DPU call is served by uPIMulator.
+#
+# Before the program starts this checks that the shim defines every dpu_* symbol
+# the binary imports, and refuses to run otherwise. An uncovered symbol would
+# resolve to the real libdpu, and on a machine with ranks that means a silent
+# hardware run producing plausible but meaningless numbers.
+#
+# Options:
+#   --program-dir DIR   bin directory of a uPIMulator linker run (required)
+#   --tasklets N        tasklets per DPU; must match how the image was built
+#   --dpus N            DPU count for programs that ask for DPU_ALLOCATE_ALL
+#   --max-cycles N      abort a launch after N cycles (0 = no limit)
+#   --verbose           trace every intercepted call
+#   --trace-hardware    also run under strace and fail on any rank access
+
+set -u
+
+here="$(dirname "$(readlink -f "$0")")"
+
+program_dir=""
+tasklets=""
+dpus=1
+max_cycles=0
+verbose=0
+trace_hardware=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        run) shift ;;
+        --program-dir) program_dir="$2"; shift 2 ;;
+        --tasklets) tasklets="$2"; shift 2 ;;
+        --dpus) dpus="$2"; shift 2 ;;
+        --max-cycles) max_cycles="$2"; shift 2 ;;
+        --verbose) verbose=1; shift ;;
+        --trace-hardware) trace_hardware=1; shift ;;
+        --) shift; break ;;
+        -h|--help) sed -n '2,25p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) break ;;
+    esac
+done
+
+if [ $# -lt 1 ]; then
+    echo "upimulator: no program given. Try --help." >&2
+    exit 2
+fi
+
+if [ -z "$program_dir" ]; then
+    echo "upimulator: --program-dir is required (the bin directory of a linker run)" >&2
+    exit 2
+fi
+
+if [ -z "$tasklets" ]; then
+    echo "upimulator: --tasklets is required, and must match how the DPU image was built" >&2
+    exit 2
+fi
+
+for needed in addresses.txt values.txt iram.bin wram.bin mram.bin atomic.bin; do
+    if [ ! -f "$program_dir/$needed" ]; then
+        echo "upimulator: $program_dir is not a linked program directory (no $needed)" >&2
+        exit 2
+    fi
+done
+
+binary="$1"
+
+if [ ! -x "$binary" ] && ! command -v "$binary" >/dev/null; then
+    echo "upimulator: cannot execute $binary" >&2
+    exit 2
+fi
+
+resolved="$binary"
+[ -x "$resolved" ] || resolved="$(command -v "$binary")"
+
+# Refuse to start if any dpu_* symbol would fall through to the real library.
+"$here/scripts/check_symbols.sh" "$resolved" || exit 1
+
+if [ ! -f "$here/build/libdpusim.so" ]; then
+    echo "upimulator: build/libdpusim.so is missing; run scripts/build.sh" >&2
+    exit 2
+fi
+
+# Belt and braces: even with every symbol intercepted, poison the profile and
+# hide the hardware backend so a gap in the shim fails instead of allocating.
+source "$here/scripts/isolation_env.sh"
+
+export UPIM_PROGRAM_DIR="$(readlink -f "$program_dir")"
+export UPIM_NUM_TASKLETS="$tasklets"
+export UPIM_NUM_DPUS="$dpus"
+export UPIM_MAX_CYCLES="$max_cycles"
+export UPIM_VERBOSE="$verbose"
+export LD_PRELOAD="$here/build/libdpusim.so${LD_PRELOAD:+:$LD_PRELOAD}"
+
+if [ "$trace_hardware" = "1" ]; then
+    exec "$here/scripts/assert_no_hardware.sh" "$@"
+fi
+
+exec "$@"

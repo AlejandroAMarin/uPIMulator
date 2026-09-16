@@ -1,0 +1,3 @@
+# Build outputs: the Go simulator library, its generated header, the libdpu
+# shim, and the test host.
+build/

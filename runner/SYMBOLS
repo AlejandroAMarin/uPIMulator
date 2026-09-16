@@ -1,0 +1,31 @@
+# Every libdpu entry point the shim must define.
+#
+# The shim replaces libdpu entirely: a simulated run must never reach the real
+# driver. Any dpu_* symbol a host binary imports that is absent here would fall
+# through to /lib/libdpu.so and allocate real hardware, so this list is checked
+# against each binary before it runs (scripts/check_symbols.sh).
+#
+# Columns: symbol, then why it is needed.
+
+# --- observed in the compiled BIMSA and GIMSA binaries ---
+dpu_alloc                    # allocate a DPU set
+dpu_free                     # release it
+dpu_load                     # load the DPU program
+dpu_get_nr_dpus              # set size
+dpu_prepare_xfer             # stage a per-DPU scatter/gather buffer
+dpu_push_xfer                # execute the staged transfer
+dpu_copy_to                  # write a named symbol
+dpu_launch                   # start the kernel
+dpu_status                   # BIMSA polls this instead of dpu_sync
+dpu_sync                     # GIMSA uses this
+dpu_log_read                 # DPU stdout; BIMSA calls puts() even at PRINT=0
+dpu_error_to_string          # DPU_ASSERT failure path
+dpu_set_dpu_iterator_from    # DPU_FOREACH expands to these two
+dpu_set_dpu_iterator_next    # DPU_FOREACH expands to these two
+
+# --- compiled out of the current binaries, required by builds we need ---
+dpu_copy_from                # read a named symbol; PERF=1 uses it for PERF_ACC
+# dpu_probe_* is deliberately absent: SDK 2025.1.0 does not define those
+# symbols at all (nm shows none in libdpu, and no header declares them), so a
+# build that referenced them could not link against the real library either.
+# BIMSA guards them behind ENERGY, which is never enabled.
