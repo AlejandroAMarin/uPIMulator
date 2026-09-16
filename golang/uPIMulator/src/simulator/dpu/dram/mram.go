@@ -11,7 +11,7 @@ type Mram struct {
 	size    int64
 
 	wordline_size int64
-	wordlines     []*Wordline
+	wordlines     map[int]*Wordline
 }
 
 func (this *Mram) Init(command_line_parser *misc.CommandLineParser) {
@@ -33,13 +33,11 @@ func (this *Mram) Init(command_line_parser *misc.CommandLineParser) {
 		panic(err)
 	}
 
-	this.wordlines = make([]*Wordline, 0)
-	num_wordlines := int(this.size / this.wordline_size)
-	for i := 0; i < num_wordlines; i++ {
-		wordline := new(Wordline)
-		wordline.Init(this.address+int64(i)*this.wordline_size, this.wordline_size)
-		this.wordlines = append(this.wordlines, wordline)
-	}
+	// Wordlines are created when first written, not up front. A DPU has 64 MB
+	// of MRAM but a workload typically touches a small part of it, and
+	// allocating all 65536 rows eagerly cost about 90 MB per simulated DPU,
+	// which is what limited how many DPUs fit in host memory.
+	this.wordlines = make(map[int]*Wordline, 0)
 }
 
 func (this *Mram) Fini() {
@@ -57,11 +55,42 @@ func (this *Mram) Size() int64 {
 }
 
 func (this *Mram) Read(address int64) *encoding.ByteStream {
-	return this.wordlines[this.Index(address)].Read()
+	wordline, found := this.wordlines[this.Index(address)]
+
+	// Memory that was never written reads as zero, so an absent wordline does
+	// not have to be created just to be read.
+	if !found {
+		byte_stream := new(encoding.ByteStream)
+		byte_stream.InitSize(this.wordline_size)
+		return byte_stream
+	}
+
+	return wordline.Read()
 }
 
 func (this *Mram) Write(address int64, byte_stream *encoding.ByteStream) {
-	this.wordlines[this.Index(address)].Write(byte_stream)
+	this.Wordline(address).Write(byte_stream)
+}
+
+// Wordline returns the row holding address, creating it on first write.
+func (this *Mram) Wordline(address int64) *Wordline {
+	index := this.Index(address)
+
+	wordline, found := this.wordlines[index]
+
+	if !found {
+		wordline = new(Wordline)
+		wordline.Init(this.address+int64(index)*this.wordline_size, this.wordline_size)
+		this.wordlines[index] = wordline
+	}
+
+	return wordline
+}
+
+// NumResidentWordlines reports how many rows have been written, for measuring
+// the memory a workload actually needs.
+func (this *Mram) NumResidentWordlines() int {
+	return len(this.wordlines)
 }
 
 func (this *Mram) Index(address int64) int {

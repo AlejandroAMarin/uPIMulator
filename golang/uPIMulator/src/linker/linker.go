@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"uPIMulator/src/core"
 	"uPIMulator/src/linker/kernel"
 	"uPIMulator/src/linker/lexer"
@@ -47,6 +48,15 @@ func (this *Linker) Init(command_line_parser *misc.CommandLineParser) {
 }
 
 func (this *Linker) InitBenchmarkRelocatable() {
+	// An external kernel is linked straight from its assembly, so any UPMEM
+	// program can be run without being added to the benchmark tree.
+	if path := this.command_line_parser.StringParameter("benchmark_asm"); path != "" {
+		this.benchmark_relocatable = new(kernel.Relocatable)
+		this.benchmark_relocatable.Init(this.benchmark)
+		this.benchmark_relocatable.SetPath(path)
+		return
+	}
+
 	benchmark_build_dirpath := filepath.Join(this.root_dirpath, "benchmark", "build")
 
 	assembly_path := filepath.Join(
@@ -90,6 +100,13 @@ func (this *Linker) InitSdkRelocatables() {
 			}
 
 			for _, sdk_lib_dir_entry := range sdk_lib_dir_entries {
+				// Only the object files hold assembly. CMake also drops its own
+				// bookkeeping here (build.make, DependInfo.cmake, *.c.o.d), and
+				// lexing any of those panics.
+				if !strings.HasSuffix(sdk_lib_dir_entry.Name(), ".c.o") {
+					continue
+				}
+
 				assembly_path := filepath.Join(sdk_lib_dirpath, sdk_lib_dir_entry.Name())
 
 				lib_dir_name := filepath.Base(sdk_lib_dirpath)
@@ -103,6 +120,17 @@ func (this *Linker) InitSdkRelocatables() {
 			}
 		}
 	}
+}
+
+// Executable exposes the linked image, including its symbol table and the
+// atomic/IRAM/WRAM/MRAM byte streams. Valid after Link.
+func (this *Linker) Executable() *kernel.Executable {
+	return this.executable
+}
+
+// LinkerScript exposes the memory layout and the linker constants. Valid after Link.
+func (this *Linker) LinkerScript() *logic.LinkerScript {
+	return this.linker_script
 }
 
 func (this *Linker) Link() {

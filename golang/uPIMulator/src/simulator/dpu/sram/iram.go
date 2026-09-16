@@ -12,6 +12,12 @@ type Iram struct {
 	size    int64
 
 	byte_stream *encoding.ByteStream
+
+	// decoded caches the instruction at each address. IRAM is written once at
+	// load and then fetched every cycle, so decoding on every fetch was pure
+	// repeated work, and the Word it allocates was a large share of the
+	// garbage the simulation produced.
+	decoded map[int64]*instruction.Instruction
 }
 
 func (this *Iram) Init() {
@@ -22,10 +28,9 @@ func (this *Iram) Init() {
 	this.size = config_loader.IramSize()
 
 	this.byte_stream = new(encoding.ByteStream)
-	this.byte_stream.Init()
-	for i := int64(0); i < this.size; i++ {
-		this.byte_stream.Append(0)
-	}
+	this.byte_stream.InitSize(this.size)
+
+	this.decoded = make(map[int64]*instruction.Instruction, 0)
 }
 
 func (this *Iram) Fini() {
@@ -40,25 +45,41 @@ func (this *Iram) Size() int64 {
 }
 
 func (this *Iram) Read(address int64) *instruction.Instruction {
-	config_loader := new(misc.ConfigLoader)
-	config_loader.Init()
+	cached, found := this.decoded[address]
 
-	iram_data_size := int64(config_loader.IramDataWidth() / 8)
+	if !found {
+		config_loader := new(misc.ConfigLoader)
+		config_loader.Init()
 
-	byte_stream := new(encoding.ByteStream)
-	byte_stream.Init()
-	for i := int64(0); i < iram_data_size; i++ {
-		index := this.Index(address) + int(i)
+		iram_data_size := int64(config_loader.IramDataWidth() / 8)
 
-		byte_stream.Append(this.byte_stream.Get(index))
+		byte_stream := new(encoding.ByteStream)
+		byte_stream.InitSize(iram_data_size)
+		for i := int64(0); i < iram_data_size; i++ {
+			index := this.Index(address) + int(i)
+
+			byte_stream.Set(int(i), this.byte_stream.Get(index))
+		}
+
+		cached = new(instruction.Instruction)
+		cached.Decode(byte_stream)
+
+		this.decoded[address] = cached
 	}
 
+	// Hand back a copy, never the cached instruction itself. An Instruction is
+	// immutable once decoded, but the logic keys its scoreboard by pointer, so
+	// two tasklets executing the same address must hold distinct pointers.
 	instruction_ := new(instruction.Instruction)
-	instruction_.Decode(byte_stream)
+	*instruction_ = *cached
 	return instruction_
 }
 
 func (this *Iram) Write(address int64, byte_stream *encoding.ByteStream) {
+	// Writes only happen when a program is loaded, so dropping every cached
+	// decode is simpler than working out which addresses this write covers.
+	clear(this.decoded)
+
 	for i := int64(0); i < byte_stream.Size(); i++ {
 		index := this.Index(address) + int(i)
 

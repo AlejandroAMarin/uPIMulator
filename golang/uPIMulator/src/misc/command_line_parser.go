@@ -41,6 +41,21 @@ func (this *CommandLineParser) Parse(os_args []string) {
 
 		if os_arg[0:2] == "--" {
 			option := os_arg[2:]
+
+			// Report an unknown or valueless option instead of dereferencing a
+			// missing map entry, which used to crash with a nil pointer.
+			if _, found := this.command_line_options[option]; !found {
+				err_msg := fmt.Sprintf("option (--%s) is not recognized", option)
+				err := errors.New(err_msg)
+				panic(err)
+			}
+
+			if i+1 >= len(os_args) {
+				err_msg := fmt.Sprintf("option (--%s) needs a value", option)
+				err := errors.New(err_msg)
+				panic(err)
+			}
+
 			custom_parameter := os_args[i+1]
 
 			this.command_line_options[option].SetCustomParameter(custom_parameter)

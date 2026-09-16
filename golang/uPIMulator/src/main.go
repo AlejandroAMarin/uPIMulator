@@ -9,6 +9,7 @@ import (
 	"uPIMulator/src/linker"
 	"uPIMulator/src/misc"
 	"uPIMulator/src/simulator"
+	"uPIMulator/src/simulator/host"
 )
 
 func main() {
@@ -49,12 +50,31 @@ func main() {
 		linker_.Init(command_line_parser)
 		linker_.Link()
 
+		// The runner supplies input data from the host program, so there is no
+		// data preparation to do and nothing to simulate here.
+		if command_line_parser.BoolParameter("link_only") {
+			fmt.Printf("Linked into %s\n", bin_dirpath)
+			return
+		}
+
 		assembler_ := new(assembler.Assembler)
 		assembler_.Init(command_line_parser)
 		assembler_.Assemble()
 
+		// Hand the linked image over in memory. The linker still dumps it for
+		// inspection, but the simulator no longer parses those files back.
+		executable := linker_.Executable()
+		program := &host.Program{
+			Addresses: executable.Addresses(),
+			Values:    linker_.LinkerScript().Values(),
+			Atomic:    executable.AtomicByteStream(),
+			Iram:      executable.IramByteStream(),
+			Wram:      executable.WramByteStream(),
+			Mram:      executable.MramByteStream(),
+		}
+
 		simulator_ := new(simulator.Simulator)
-		simulator_.Init(command_line_parser)
+		simulator_.Init(command_line_parser, program)
 
 		for !simulator_.IsFinished() {
 			simulator_.Cycle()
@@ -79,6 +99,15 @@ func InitCommandLineParser() *misc.CommandLineParser {
 		"number of simulation threads to launch")
 
 	command_line_parser.AddOption(misc.STRING, "benchmark", "BS", "benchmark name")
+
+	command_line_parser.AddOption(misc.STRING, "dpu_cc", "dpu-upmem-dpurte-clang",
+		"DPU compiler of the installed UPMEM SDK")
+
+	command_line_parser.AddOption(misc.STRING, "benchmark_asm", "",
+		"link this kernel assembly instead of a benchmark from the tree")
+
+	command_line_parser.AddOption(misc.BOOL, "link_only", "false",
+		"stop after linking, leaving a program directory for the runner")
 
 	command_line_parser.AddOption(misc.INT, "num_channels", "1", "number of PIM memory channels")
 	command_line_parser.AddOption(

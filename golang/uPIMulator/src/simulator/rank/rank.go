@@ -62,18 +62,7 @@ func (this *Rank) Read(dpu_id int, address int64, size int64) *encoding.ByteStre
 		panic(err)
 	}
 
-	config_loader := new(misc.ConfigLoader)
-	config_loader.Init()
-
-	if config_loader.WramOffset() <= address &&
-		address+size <= config_loader.WramOffset()+config_loader.WramSize() {
-		return dpu_.Dma().TransferFromWram(address, size)
-	} else if config_loader.MramOffset() <= address && address+size <= config_loader.MramOffset()+config_loader.MramSize() {
-		return dpu_.Dma().TransferFromMram(address, size)
-	} else {
-		err := errors.New("address does not fall under WRAM nor MRAM region")
-		panic(err)
-	}
+	return dpu_.Read(address, size)
 }
 
 func (this *Rank) Write(dpu_id int, address int64, byte_stream *encoding.ByteStream) {
@@ -84,16 +73,5 @@ func (this *Rank) Write(dpu_id int, address int64, byte_stream *encoding.ByteStr
 		panic(err)
 	}
 
-	config_loader := new(misc.ConfigLoader)
-	config_loader.Init()
-
-	if config_loader.WramOffset() <= address &&
-		address+byte_stream.Size() <= config_loader.WramOffset()+config_loader.WramSize() {
-		dpu_.Dma().TransferToWram(address, byte_stream)
-	} else if config_loader.MramOffset() <= address && address+byte_stream.Size() <= config_loader.MramOffset()+config_loader.MramSize() {
-		dpu_.Dma().TransferToMram(address, byte_stream)
-	} else {
-		err := errors.New("address does not fall under WRAM nor MRAM region")
-		panic(err)
-	}
+	dpu_.Write(address, byte_stream)
 }

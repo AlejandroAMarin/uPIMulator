@@ -55,87 +55,37 @@ func (this *Host) Init(command_line_parser *misc.CommandLineParser) {
 	this.num_tasklets = int(command_line_parser.IntParameter("num_tasklets"))
 
 	this.channels = make([]*channel.Channel, 0)
+}
 
-	this.InitAddresses()
-	this.InitValues()
-	this.InitAtomic()
-	this.InitIram()
-	this.InitWram()
-	this.InitMram()
+// LoadProgram installs a linked DPU image. Call it after Init and before the
+// simulator runs. The command line path builds the Program from bin_dirpath;
+// a caller driving the simulator directly builds one in memory.
+func (this *Host) LoadProgram(program *Program) {
+	this.addresses = program.Addresses
+	this.values = program.Values
+
+	this.atomic = program.Atomic
+	this.iram = program.Iram
+	this.wram = program.Wram
+	this.mram = program.Mram
+}
+
+// LoadChunksFromDir reads the host-to-DPU and DPU-to-host data the assembler
+// wrote, plus the execution count. This is the fixed-benchmark path only: a
+// real host program supplies its transfers through the API instead.
+func (this *Host) LoadChunksFromDir() {
 	this.InitNumExecutions()
 	this.InitChunks()
 }
 
-func (this *Host) InitAddresses() {
-	path := filepath.Join(this.bin_dirpath, "addresses.txt")
-
-	file_scanner := new(misc.FileScanner)
-	file_scanner.Init(path)
-
-	lines := file_scanner.ReadLines()
-
-	this.addresses = make(map[string]int64, 0)
-
-	for _, line := range lines {
-		words := strings.Split(line, ":")
-
-		name := words[0]
-		address, err := strconv.ParseInt(words[1][1:], 10, 64)
-
-		if err != nil {
-			panic(err)
-		}
-
-		this.addresses[name] = address
-	}
+// Addresses maps a label to its address, for resolving a transfer by symbol name.
+func (this *Host) Addresses() map[string]int64 {
+	return this.addresses
 }
 
-func (this *Host) InitValues() {
-	path := filepath.Join(this.bin_dirpath, "values.txt")
-
-	file_scanner := new(misc.FileScanner)
-	file_scanner.Init(path)
-
-	lines := file_scanner.ReadLines()
-
-	this.values = make(map[string]int64, 0)
-
-	for _, line := range lines {
-		words := strings.Split(line, ":")
-
-		name := words[0]
-		address, err := strconv.ParseInt(words[1][1:], 10, 64)
-
-		if err != nil {
-			panic(err)
-		}
-
-		this.values[name] = address
-	}
-}
-
-func (this *Host) InitAtomic() {
-	path := filepath.Join(this.bin_dirpath, "atomic.bin")
-
-	this.atomic = this.InitByteStream(path)
-}
-
-func (this *Host) InitIram() {
-	path := filepath.Join(this.bin_dirpath, "iram.bin")
-
-	this.iram = this.InitByteStream(path)
-}
-
-func (this *Host) InitWram() {
-	path := filepath.Join(this.bin_dirpath, "wram.bin")
-
-	this.wram = this.InitByteStream(path)
-}
-
-func (this *Host) InitMram() {
-	path := filepath.Join(this.bin_dirpath, "mram.bin")
-
-	this.mram = this.InitByteStream(path)
+// Values maps a linker constant to its value, notably __sys_used_mram_end.
+func (this *Host) Values() map[string]int64 {
+	return this.values
 }
 
 func (this *Host) InitNumExecutions() {

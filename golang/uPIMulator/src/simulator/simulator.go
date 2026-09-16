@@ -20,9 +20,32 @@ type Simulator struct {
 	verbose int
 }
 
-func (this *Simulator) Init(command_line_parser *misc.CommandLineParser) {
+// Init builds the machine and starts the first run. This is the fixed-benchmark
+// entry point, where the number of runs is known before the simulation starts.
+func (this *Simulator) Init(command_line_parser *misc.CommandLineParser, program *host.Program) {
+	this.Build(command_line_parser, program)
+
+	this.host.LoadChunksFromDir()
+
+	this.host.Load()
+	this.host.Schedule(this.execution)
+	this.host.Launch()
+}
+
+// Build constructs the machine and installs the program, but starts nothing. A
+// caller that decides for itself when kernels run uses this, then drives
+// Host().Load, Host().Launch and CycleOnce directly.
+func (this *Simulator) Build(command_line_parser *misc.CommandLineParser, program *host.Program) {
 	this.host = new(host.Host)
 	this.host.Init(command_line_parser)
+
+	// A nil program means read back what the linker dumped. Passing the program
+	// the linker already holds avoids writing several megabytes of decimal text
+	// and parsing it again a moment later.
+	if program == nil {
+		program = host.LoadProgramFromDir(command_line_parser.StringParameter("bin_dirpath"))
+	}
+	this.host.LoadProgram(program)
 
 	this.verbose = int(command_line_parser.IntParameter("verbose"))
 
@@ -40,10 +63,11 @@ func (this *Simulator) Init(command_line_parser *misc.CommandLineParser) {
 	this.bin_dirpath = command_line_parser.StringParameter("bin_dirpath")
 	this.num_simulation_threads = int(command_line_parser.IntParameter("num_simulation_threads"))
 	this.execution = 0
+}
 
-	this.host.Load()
-	this.host.Schedule(this.execution)
-	this.host.Launch()
+// Host exposes the host model, and through it the DPUs and their statistics.
+func (this *Simulator) Host() *host.Host {
+	return this.host
 }
 
 func (this *Simulator) Fini() {
@@ -58,7 +82,12 @@ func (this *Simulator) IsFinished() bool {
 	return this.execution == this.host.NumExecutions()
 }
 
-func (this *Simulator) Cycle() {
+// CycleOnce advances the machine by one DPU logic cycle and nothing else.
+//
+// It carries no notion of how many runs there are or when one ends, so a caller
+// that launches kernels itself can drive the simulation with it. Cycle builds
+// the fixed-benchmark behaviour on top.
+func (this *Simulator) CycleOnce() {
 	this.host.Cycle()
 
 	thread_pool := new(core.ThreadPool)
@@ -73,6 +102,10 @@ func (this *Simulator) Cycle() {
 	}
 
 	thread_pool.Start()
+}
+
+func (this *Simulator) Cycle() {
+	this.CycleOnce()
 
 	if this.host.IsZombie() {
 		fmt.Printf("execution (%d) is finished...\n", this.execution)

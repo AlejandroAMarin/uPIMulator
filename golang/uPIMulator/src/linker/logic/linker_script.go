@@ -394,6 +394,18 @@ func (this *LinkerScript) AssignMram(executable *kernel.Executable) {
 	}
 }
 
+// Values returns the linker constants by name, so a caller can take them
+// directly instead of reading back what DumpValues wrote.
+func (this *LinkerScript) Values() map[string]int64 {
+	values := make(map[string]int64, len(this.linker_constants))
+
+	for _, linker_constant := range this.linker_constants {
+		values[linker_constant.Name()] = linker_constant.Value()
+	}
+
+	return values
+}
+
 func (this *LinkerScript) DumpValues(path string) {
 	lines := make([]string, 0)
 

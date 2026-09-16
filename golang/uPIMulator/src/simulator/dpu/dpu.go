@@ -3,6 +3,7 @@ package dpu
 import (
 	"errors"
 	"fmt"
+	"uPIMulator/src/abi/encoding"
 	"uPIMulator/src/misc"
 	"uPIMulator/src/simulator/dpu/dram"
 	"uPIMulator/src/simulator/dpu/logic"
@@ -161,6 +162,46 @@ func (this *Dpu) Threads() []*logic.Thread {
 
 func (this *Dpu) StatFactory() *misc.StatFactory {
 	return this.stat_factory
+}
+
+// Read returns size bytes starting at address, choosing WRAM or MRAM by which
+// region the range falls in.
+//
+// The DPU must be quiescent: the MRAM path flushes the memory controller, which
+// panics if requests are still in flight. Call it before a launch or after the
+// DPU has become a zombie, never mid-run.
+func (this *Dpu) Read(address int64, size int64) *encoding.ByteStream {
+	config_loader := new(misc.ConfigLoader)
+	config_loader.Init()
+
+	if config_loader.WramOffset() <= address &&
+		address+size <= config_loader.WramOffset()+config_loader.WramSize() {
+		return this.dma.TransferFromWram(address, size)
+	} else if config_loader.MramOffset() <= address &&
+		address+size <= config_loader.MramOffset()+config_loader.MramSize() {
+		return this.dma.TransferFromMram(address, size)
+	} else {
+		err := errors.New("address does not fall under WRAM nor MRAM region")
+		panic(err)
+	}
+}
+
+// Write stores a byte stream at address, choosing WRAM or MRAM by region.
+// The same quiescence rule as Read applies.
+func (this *Dpu) Write(address int64, byte_stream *encoding.ByteStream) {
+	config_loader := new(misc.ConfigLoader)
+	config_loader.Init()
+
+	if config_loader.WramOffset() <= address &&
+		address+byte_stream.Size() <= config_loader.WramOffset()+config_loader.WramSize() {
+		this.dma.TransferToWram(address, byte_stream)
+	} else if config_loader.MramOffset() <= address &&
+		address+byte_stream.Size() <= config_loader.MramOffset()+config_loader.MramSize() {
+		this.dma.TransferToMram(address, byte_stream)
+	} else {
+		err := errors.New("address does not fall under WRAM nor MRAM region")
+		panic(err)
+	}
 }
 
 func (this *Dpu) Boot() {

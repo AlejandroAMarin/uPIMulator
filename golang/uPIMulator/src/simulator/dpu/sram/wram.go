@@ -21,10 +21,7 @@ func (this *Wram) Init() {
 	this.size = config_loader.WramSize()
 
 	this.byte_stream = new(encoding.ByteStream)
-	this.byte_stream.Init()
-	for i := int64(0); i < this.size; i++ {
-		this.byte_stream.Append(0)
-	}
+	this.byte_stream.InitSize(this.size)
 }
 
 func (this *Wram) Fini() {

@@ -2784,7 +2784,7 @@ func (this *Instruction) EncodeSRrr(word_ *word.Word) {
 		panic(err)
 	}
 
-	if this.suffix != RRR {
+	if this.suffix != S_RRR && this.suffix != U_RRR {
 		err := errors.New("suffix is not S_RRR nor U_RRR")
 		panic(err)
 	}
@@ -4855,7 +4855,7 @@ func (this *Instruction) DecodeSRrr(word_ *word.Word) {
 		panic(err)
 	}
 
-	if this.suffix != S_RRR {
+	if this.suffix != S_RRR && this.suffix != U_RRR {
 		err := errors.New("suffix is not S_RRR nor U_RRR")
 		panic(err)
 	}

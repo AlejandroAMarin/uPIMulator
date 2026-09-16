@@ -34,24 +34,14 @@ func (this *Wordline) Init(address int64, size int64) {
 	this.size = size
 
 	this.byte_stream = new(encoding.ByteStream)
-	this.byte_stream.Init()
-	for i := int64(0); i < size; i++ {
-		this.byte_stream.Append(0)
-	}
+	this.byte_stream.InitSize(size)
 }
 
 func (this *Wordline) Fini() {
 }
 
 func (this *Wordline) Read() *encoding.ByteStream {
-	byte_stream := new(encoding.ByteStream)
-	byte_stream.Init()
-
-	for i := int64(0); i < this.byte_stream.Size(); i++ {
-		byte_stream.Append(this.byte_stream.Get(int(i)))
-	}
-
-	return byte_stream
+	return this.byte_stream.Clone()
 }
 
 func (this *Wordline) Write(byte_stream *encoding.ByteStream) {
