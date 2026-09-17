@@ -21,7 +21,7 @@ operation served by simulation. That part works. BIMSA first, GIMSA next.
 | M1 simulator as a library | **Done** |
 | M2 memory and speed | **Done** (147 MB -> 2.5 MB per DPU; 2.26x faster) |
 | M3 libdpu shim | **Done**, BIMSA runs end to end |
-| M4 validation study | **Unblocked.** BIMSA now returns correct scores under the simulator. Not yet measured against hardware |
+| M4 validation study | **First result in.** Instruction counts match hardware exactly; cycle counts are inside ±5.3% over 1-16 tasklets. One workload, one DPU |
 | M5 architecture exploration | Not started |
 
 ## The former blocker: eleven functional bugs, all fixed
@@ -74,31 +74,59 @@ cannot accept. The linker itself only says "stack are not stmts" after building
 the whole SDK, which is far too slow to bisect against. `hash` and
 `.section .stack_sizes` are the two known gaps.
 
-## Resume M4
+## M4: the result
 
-BIMSA already runs correctly under the simulator. Verified 2026-09-17, against
-`backend=simulator` as the control, with `inputs/n2_l129_e2.seq`:
+BIMSA, 16 short pairs, edit distance, 1 DPU. Full method, caveats and the
+calibration behind it in `runner/tests/perf/README.md`.
 
-- 1 tasklet, 1 pair: score 16, CIGARs valid, `CPU recovery for 0 pairs (0.00%)`.
-- 4 tasklets, 4 pairs: scores 16 16 16 16, "Results are equal".
-- Counters for the 1-pair run: 450838 logic cycles, 39033 instructions,
-  2705028 memory cycles.
+| tasklets | cycles, hardware | cycles, uPIMulator | error |
+|---|---|---|---|
+| 1 | 7502864 | 7138112 | -4.86% |
+| 2 | 7577552 | 7203856 | -4.93% |
+| 4 | 7761952 | 7351264 | -5.29% |
+| 8 | 8385904 | 8527168 | +1.68% |
+| 16 | 8385328 | 8598000 | +2.54% |
 
-What is left is the measurement itself:
+Instruction counts match exactly at 1 tasklet, +0.03% at 4, +0.12% at 16.
 
-1. Reference hardware runs: build with `PERF=1 PERF_TIER=3 PERF_CYCLES=1
-   DYNAMIC=0 BATCH_SIZE=0`, run with `-e 1 -w 0`.
-2. Compare **`max` over tasklets of `PERF_ACC[t][PERF_S_TOTAL]`**, never the sum:
-   one perfcounter register is shared by all 24 hardware threads, so the sum is
-   about NR_TASKLETS x the wall clock. `PERF_CLK` reads 350000000 here.
-3. Simulator side: `UPIM_STATS=<file>` writes `logic_cycle`, `num_instructions`
-   and `memory_cycle` per DPU at `dpu_free`.
-4. Do instruction counts first (`PERF_INSTRUCTIONS=1` vs `num_instructions`):
-   frequency independent, so it validates the functional model before the timing
-   model.
-5. **Gate every data point on `CPU recovery for 0 pairs (0.00%)`.** Also only
-   `-b 0 -e 1` runs are analysable: `global_pair` in the kernel is a `.data`
-   global that is never reset per launch.
+**The timing model is trustworthy to about 5% on this workload.** It is
+optimistic when few tasklets run and pessimistic when the pipeline is full. At
+one tasklet the DPU issues every 11 cycles regardless, so the cycle count is
+11 x instructions plus stalls: hardware spends 12.33 cycles per instruction and
+uPIMulator 11.57, which means the 11-cycle interval is exact and about 43% of
+the MRAM stall is modelled. Above 8 tasklets the revolver hides the stalls and
+that error goes away.
+
+Hardware run-to-run variation is 0.04%, so the trend is real.
+
+    runner/tests/perf/sweep.sh <input.seq> <seq-size> cycles 1 2 4 8 16
+
+The sweep builds both sides from the same `make -n` command, runs each, and
+gates every point on `CPU recovery for 0 pairs (0.00%)` and `Results are equal`.
+
+### Before trusting a number from it
+
+- **Never sum a counter over tasklets.** One register serves the whole DPU, so
+  each tasklet's reading counts every tasklet's work. Proved on hardware in
+  `runner/tests/perf/README.md`. BIMSA's host prints the sum, so its
+  `[PERF] total` is inflated by the live tasklet count; that cancels in a
+  hardware-to-simulator ratio only while both sides have the same number live,
+  which the sweep checks.
+- **Both sides must run the same binary.** An early comparison here was off by
+  25% purely because one build fused a loop counter into a conditional add and
+  the other did not. Use `build_bimsa.sh`; do not hand-write the macro list.
+- **Do not compare `PERF_S_TOTAL` against `num_instructions`.** The probe covers
+  the kernel; `num_instructions` covers the whole launch, 3% more.
+
+### What is left
+
+1. More workloads and input sizes. The error moves with the input: the same
+   comparison at a single pair gives -6.2% rather than -4.9%.
+2. More than one DPU, which is the first thing to test the channel, rank and
+   host-transfer models at all.
+3. `PERF_TIER=1` or `2` to find which part of the kernel the model gets wrong.
+   Tier 3 only says the total is 5% out.
+4. GIMSA.
 
 ## Safety: never touch the hardware from a simulated run
 
@@ -140,6 +168,12 @@ the only commands allowed to ask for `backend=hw`, and they must be deliberate.
 
     # ALU / condition-code / DMA conformance against UPMEM's own simulator
     uPIMulator/runner/tests/alu/run.sh
+
+    # M4: BIMSA on hardware vs the simulator (asks for backend=hw deliberately)
+    uPIMulator/runner/tests/perf/sweep.sh <input.seq> <seq-size> cycles 1 2 4 8 16
+
+    # build BIMSA's kernel for uPIMulator from make's own command
+    uPIMulator/runner/tests/perf/build_bimsa.sh <out> NR_TASKLETS=N PERF=1 ...
 
     # double-precision regression
     uPIMulator/runner/tests/fp/README.md has the commands
@@ -194,6 +228,13 @@ BIMSA's kernel flags come from `make -n` in `bimsa/upmem`; add `-S -g0
 
 - Eleven functional bugs in the ALU, the condition codes and the DMA. See the
   table above and `runner/tests/alu/README.md`.
+- `time` and `time_cfg` now model the performance counter: one register per DPU,
+  advancing once per 16 events as the hardware's does. Without them no
+  instrumented kernel could run at all, so there was no way to measure the same
+  span on both sides.
+- `CLOCKS_PER_SEC` is filled in when a program is installed. On hardware libdpu
+  writes the rank's frequency there at load; nothing wrote it here, so a kernel
+  converting cycles to a duration divided by zero.
 - `cshared` reads `UPIM_TRACE` so a library run can produce an instruction
   trace. Without it the runner could only trace intercepted calls, not the
   kernel, and nothing inside a DPU was observable.

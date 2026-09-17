@@ -39,6 +39,13 @@ type Logic struct {
 	alu    *Alu
 	wait_q *InstructionQ
 
+	// One performance counter per DPU, as on the hardware: a single register
+	// that all 24 threads share. perf_acc holds what earlier configurations
+	// contributed, perf_base the source's reading when the current one started.
+	perf_mode int64
+	perf_base int64
+	perf_acc  int64
+
 	stat_factory *misc.StatFactory
 }
 
@@ -68,6 +75,12 @@ func (this *Logic) Init(
 	this.num_dpus_per_rank = int(command_line_parser.IntParameter("num_dpus_per_rank"))
 
 	this.min_access_granularity = command_line_parser.IntParameter("min_access_granularity")
+
+	// The time register free-runs as a cycle count until a program configures
+	// it, which is what the SDK calls it: "the DPU's free-running time register".
+	this.perf_mode = COUNT_CYCLES
+	this.perf_base = 0
+	this.perf_acc = 0
 
 	this.verbose = int(command_line_parser.IntParameter("verbose"))
 
@@ -262,6 +275,67 @@ func (this *Logic) ServiceDma() {
 			panic(err)
 		}
 	}
+}
+
+// The performance counter's sources, as perfcounter_config_t encodes them in
+// sdk/syslib/perfcounter.h. time_cfg takes (reset | source << 1).
+const (
+	COUNT_SAME         = 0
+	COUNT_CYCLES       = 1
+	COUNT_INSTRUCTIONS = 2
+	COUNT_NOTHING      = 3
+
+	// The counter register advances once per this many events, so the low four
+	// bits of any measurement are lost. perfcounter_get() shifts its reading
+	// left by 4 to undo it, which is why the SDK calls the constant
+	// BIT_IMPRECISION. Calibrated on this machine's hardware by
+	// runner/tests/perf: one tasklet running a two-instruction loop reports 2
+	// instructions and 22 cycles per iteration, so the reconstructed value is
+	// the true count and not a scaled one.
+	PERF_IMPRECISION = 16
+)
+
+// PerfSource returns the raw count the configured source follows.
+func (this *Logic) PerfSource() int64 {
+	if this.perf_mode == COUNT_CYCLES {
+		return this.stat_factory.Value("logic_cycle")
+	} else if this.perf_mode == COUNT_INSTRUCTIONS {
+		return this.stat_factory.Value("num_instructions")
+	}
+
+	// COUNT_NOTHING: the counter holds whatever it had reached.
+	return 0
+}
+
+// PerfCounter returns the counter register's value, which is the count divided
+// by PERF_IMPRECISION.
+func (this *Logic) PerfCounter() int64 {
+	return (this.perf_acc + this.PerfSource() - this.perf_base) / PERF_IMPRECISION
+}
+
+// ConfigurePerfCounter applies a time_cfg operand and returns the register's
+// value from before the change, which is what perfcounter_config() hands back.
+// Bit 0 resets the count; the bits above it select the source, where zero keeps
+// the current one.
+func (this *Logic) ConfigurePerfCounter(config int64) int64 {
+	previous := this.PerfCounter()
+
+	// Close the running accumulation before the source changes under it,
+	// otherwise a switch from cycles to instructions subtracts one count from
+	// the other.
+	this.perf_acc += this.PerfSource() - this.perf_base
+
+	if mode := (config >> 1) & 3; mode != COUNT_SAME {
+		this.perf_mode = mode
+	}
+
+	this.perf_base = this.PerfSource()
+
+	if config&1 != 0 {
+		this.perf_acc = 0
+	}
+
+	return previous
 }
 
 func (this *Logic) ExecuteInstruction(instruction_ *instruction.Instruction) {
@@ -3764,8 +3838,7 @@ func (this *Logic) ExecuteRr(instruction_ *instruction.Instruction) {
 	} else if op_code == instruction.SATS {
 		result = this.alu.Sats(ra)
 	} else if op_code == instruction.TIME_CFG {
-		err := errors.New("TimeCfg is not yet implemented")
-		panic(err)
+		result = this.ConfigurePerfCounter(ra)
 	} else {
 		err := errors.New("op code is not valid")
 		panic(err)
@@ -3813,8 +3886,7 @@ func (this *Logic) ExecuteRrc(instruction_ *instruction.Instruction) {
 	} else if op_code == instruction.SATS {
 		result = this.alu.Sats(ra)
 	} else if op_code == instruction.TIME_CFG {
-		err := errors.New("TimeCfg is not yet implemented")
-		panic(err)
+		result = this.ConfigurePerfCounter(ra)
 	} else {
 		err := errors.New("op code is not valid")
 		panic(err)
@@ -3944,9 +4016,35 @@ func (this *Logic) ExecuteExtsbRrci(instruction_ *instruction.Instruction) {
 	this.SetFlags(instruction_, result, false)
 }
 
+// ExecuteTimeCfgRrci is `time_cfg rc, ra, cc, pc`: configure the counter, put
+// its previous value in rc, and branch on the condition.
 func (this *Logic) ExecuteTimeCfgRrci(instruction_ *instruction.Instruction) {
-	err := errors.New("ExecuteTimeCfgRrci is not yet implemented")
-	panic(err)
+	if _, found := instruction_.TimeCfgRrciOpCodes()[instruction_.OpCode()]; !found {
+		err := errors.New("op code is not a valid time_cfg RRCI op code")
+		panic(err)
+	} else if instruction_.Suffix() != instruction.RRCI {
+		err := errors.New("suffix is not RRCI")
+		panic(err)
+	}
+
+	thread := this.scoreboard[instruction_]
+
+	ra := thread.RegFile().ReadSrcReg(instruction_.Ra(), word.SIGNED)
+
+	result := this.ConfigurePerfCounter(ra)
+
+	thread.RegFile().ClearConditions()
+	this.SetLogNzCc(instruction_, ra, result)
+
+	thread.RegFile().WriteGpReg(instruction_.Rc(), result)
+
+	if thread.RegFile().ReadConditionReg(instruction_.Condition()) {
+		thread.RegFile().WritePcReg(instruction_.Pc().Value())
+	} else {
+		thread.RegFile().IncrementPcReg()
+	}
+
+	this.SetFlags(instruction_, result, false)
 }
 
 func (this *Logic) ExecuteZr(instruction_ *instruction.Instruction) {
@@ -3984,8 +4082,7 @@ func (this *Logic) ExecuteZr(instruction_ *instruction.Instruction) {
 	} else if op_code == instruction.SATS {
 		result = this.alu.Sats(ra)
 	} else if op_code == instruction.TIME_CFG {
-		err := errors.New("TimeCfg is not yet implemented")
-		panic(err)
+		result = this.ConfigurePerfCounter(ra)
 	} else {
 		err := errors.New("op code is not valid")
 		panic(err)
@@ -4032,8 +4129,7 @@ func (this *Logic) ExecuteZrc(instruction_ *instruction.Instruction) {
 	} else if op_code == instruction.SATS {
 		result = this.alu.Sats(ra)
 	} else if op_code == instruction.TIME_CFG {
-		err := errors.New("TimeCfg is not yet implemented")
-		panic(err)
+		result = this.ConfigurePerfCounter(ra)
 	} else {
 		err := errors.New("op code is not valid")
 		panic(err)
@@ -4153,9 +4249,32 @@ func (this *Logic) ExecuteExtsbZrci(instruction_ *instruction.Instruction) {
 	this.SetFlags(instruction_, result, false)
 }
 
+// ExecuteTimeCfgZrci is ExecuteTimeCfgRrci with the previous value discarded.
 func (this *Logic) ExecuteTimeCfgZrci(instruction_ *instruction.Instruction) {
-	err := errors.New("ExecuteTimeCfgZrci is not yet implemented")
-	panic(err)
+	if _, found := instruction_.TimeCfgRrciOpCodes()[instruction_.OpCode()]; !found {
+		err := errors.New("op code is not a valid time_cfg RRCI op code")
+		panic(err)
+	} else if instruction_.Suffix() != instruction.ZRCI {
+		err := errors.New("suffix is not ZRCI")
+		panic(err)
+	}
+
+	thread := this.scoreboard[instruction_]
+
+	ra := thread.RegFile().ReadSrcReg(instruction_.Ra(), word.SIGNED)
+
+	result := this.ConfigurePerfCounter(ra)
+
+	thread.RegFile().ClearConditions()
+	this.SetLogNzCc(instruction_, ra, result)
+
+	if thread.RegFile().ReadConditionReg(instruction_.Condition()) {
+		thread.RegFile().WritePcReg(instruction_.Pc().Value())
+	} else {
+		thread.RegFile().IncrementPcReg()
+	}
+
+	this.SetFlags(instruction_, result, false)
 }
 
 func (this *Logic) ExecuteSRr(instruction_ *instruction.Instruction) {
@@ -4711,14 +4830,59 @@ func (this *Logic) ExecuteSRirci(instruction_ *instruction.Instruction) {
 	panic(err)
 }
 
+// ExecuteR is `time rc`, the only R-form instruction: it reads the performance
+// counter register.
 func (this *Logic) ExecuteR(instruction_ *instruction.Instruction) {
-	err := errors.New("ExecuteR is not yet implemented")
-	panic(err)
+	if _, found := instruction_.ROpCodes()[instruction_.OpCode()]; !found {
+		err := errors.New("op code is not a valid R op code")
+		panic(err)
+	} else if instruction_.Suffix() != instruction.R {
+		err := errors.New("suffix is not R")
+		panic(err)
+	} else if instruction_.OpCode() != instruction.TIME {
+		err := errors.New("op code is not valid")
+		panic(err)
+	}
+
+	thread := this.scoreboard[instruction_]
+
+	result := this.PerfCounter()
+
+	thread.RegFile().ClearConditions()
+	thread.RegFile().WriteGpReg(instruction_.Rc(), result)
+	thread.RegFile().IncrementPcReg()
+
+	this.SetFlags(instruction_, result, false)
 }
 
+// ExecuteRci is `time rc, cc, pc`: ExecuteR with a branch. The form carries a
+// TrueCc, so the condition is the literal true or false.
 func (this *Logic) ExecuteRci(instruction_ *instruction.Instruction) {
-	err := errors.New("ExecuteRci is not yet implemented")
-	panic(err)
+	if _, found := instruction_.RciOpCodes()[instruction_.OpCode()]; !found {
+		err := errors.New("op code is not a valid RCI op code")
+		panic(err)
+	} else if instruction_.Suffix() != instruction.RCI {
+		err := errors.New("suffix is not RCI")
+		panic(err)
+	} else if instruction_.OpCode() != instruction.TIME {
+		err := errors.New("op code is not valid")
+		panic(err)
+	}
+
+	thread := this.scoreboard[instruction_]
+
+	result := this.PerfCounter()
+
+	thread.RegFile().ClearConditions()
+	thread.RegFile().WriteGpReg(instruction_.Rc(), result)
+
+	if thread.RegFile().ReadConditionReg(instruction_.Condition()) {
+		thread.RegFile().WritePcReg(instruction_.Pc().Value())
+	} else {
+		thread.RegFile().IncrementPcReg()
+	}
+
+	this.SetFlags(instruction_, result, false)
 }
 
 func (this *Logic) ExecuteZ(instruction_ *instruction.Instruction) {

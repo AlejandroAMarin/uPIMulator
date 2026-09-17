@@ -133,7 +133,39 @@ func New(config Config, program *host.Program) (set *Set, err error) {
 	}
 	set.baseline = make([]map[string]int64, len(set.dpus))
 
+	if err := set.writeClocksPerSec(config.LogicFrequency); err != nil {
+		return nil, err
+	}
+
 	return set, nil
+}
+
+// writeClocksPerSec fills in the CLOCKS_PER_SEC the runtime declares in crt0.c.
+// On hardware libdpu writes the rank's real frequency there at load time, and a
+// kernel that turns a cycle count into a duration reads it. Nothing wrote it
+// here, so every such kernel divided by zero: BIMSA's own reconciliation of its
+// perfcounter against the wall clock silently reported nothing.
+//
+// The value is the frequency this set is configured to model, so it agrees with
+// the cycle counts the same run reports.
+func (this *Set) writeClocksPerSec(logic_frequency_mhz int) error {
+	address, found := this.SymbolAddress("CLOCKS_PER_SEC")
+
+	if !found {
+		// Older images, or a kernel linked without crt0. Nothing to fill in.
+		return nil
+	}
+
+	hz := uint32(logic_frequency_mhz) * 1000000
+	data := []byte{byte(hz), byte(hz >> 8), byte(hz >> 16), byte(hz >> 24)}
+
+	for i := range this.dpus {
+		if err := this.CopyTo(i, address, data); err != nil {
+			return fmt.Errorf("uPIMulator: writing CLOCKS_PER_SEC: %v", err)
+		}
+	}
+
+	return nil
 }
 
 // NumDpus returns how many DPUs the set holds.
