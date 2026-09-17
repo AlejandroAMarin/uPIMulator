@@ -42,6 +42,81 @@ reproduces the 11-cycle issue interval exactly but only about 43% of the stall.
 Once 8 or more tasklets are ready the revolver hides the stalls behind other
 threads, that error disappears, and a smaller one of the opposite sign is left.
 
+## DPU sweep
+
+Same workload on each DPU (4 pairs, 4 tasklets), the DPU count swept and the
+input regenerated each time so the work per DPU stays fixed.
+
+    runner/tests/perf/sweep_dpus.sh <base-pair.seq> 200 4 4 cycles 1 2 4 8 16
+
+| DPUs | pairs | hardware | uPIMulator | error | hw per DPU-tasklet | sim per DPU-tasklet |
+|---|---|---|---|---|---|---|
+| 1 | 4 | 1895792 | 1803312 | -4.88% | 473948 | 450828 |
+| 2 | 8 | 3897072 | 3690880 | -5.29% | 487134 | 461360 |
+| 4 | 16 | 7809728 | 7381760 | -5.48% | 488108 | 461360 |
+| 8 | 32 | 15599200 | 14763520 | -5.36% | 487475 | 461360 |
+| 16 | 64 | 31227904 | 29527040 | -5.45% | 487936 | 461360 |
+
+The error does not grow with the DPU count: it is the same -5% the tasklet
+sweep found. uPIMulator's per-DPU figure is identical to the digit from 2 DPUs
+up, and the hardware's is constant to 0.2%. DPUs share nothing during a kernel
+on either side, and the model composes accordingly. The 1-DPU point sits lower
+on both, which is the smaller total input, not the DPU count.
+
+**This does not test the channel model.** See below.
+
+## The channel model is not on the runner's path
+
+`api.CopyTo` and `api.CopyFrom` write and read DPU memory directly.
+`Host.Schedule`/`Host.Check`, which are what build channel messages, are called
+only from `Simulator.Init` -- the standalone `--benchmark` path. `api.New` calls
+`Simulator.Build` and `Host.Load`, and `api.Launch` calls `Host.Launch`; none of
+them touches a channel.
+
+So a host-to-DPU transfer under the runner costs **zero simulated cycles**.
+Confirmed by transferring 4 MB to each of 4 DPUs and back through the runner:
+the simulator advanced no cycles at all. Adding DPUs therefore cannot test the
+channel, and no timing result the runner produces depends on it.
+
+### What the model would predict if it were on that path
+
+Measured on this machine's hardware with `xfer_host.c`, 4 MB per DPU, best of
+three:
+
+| DPUs | write, hardware | read, hardware |
+|---|---|---|
+| 1 | 0.954 GB/s | 0.232 GB/s |
+| 4 | 1.763 GB/s | 0.866 GB/s |
+| 16 | 5.006 GB/s | 2.617 GB/s |
+| 64 | 4.608 GB/s | 2.562 GB/s |
+
+The model, derived from the code rather than measured: `Host` groups a rank's
+DPUs into 8 classes by `dpu_id % 8` and issues one channel message per class,
+each charged one DPU's chunk size. `Channel.ServiceInputQ` takes
+`size / bandwidth` cycles per message at the logic clock, and the messages are
+serialised. With `read_bandwidth` 1 and `write_bandwidth` 3 bytes per cycle at
+350 MHz, N DPUs of S bytes each cost `min(N,8) * S / bandwidth` cycles, so the
+aggregate is `(N / min(N,8)) * bandwidth * 350 MHz`:
+
+| DPUs | write, model | vs hardware | read, model | vs hardware |
+|---|---|---|---|---|
+| 1 | 1.05 GB/s | 1.10x | 0.35 GB/s | 1.51x |
+| 4 | 1.05 GB/s | 0.60x | 0.35 GB/s | 0.40x |
+| 16 | 2.10 GB/s | 0.42x | 0.70 GB/s | 0.27x |
+| 64 | 8.40 GB/s | 1.82x | 2.80 GB/s | 1.09x |
+
+The constants are close at one DPU, where they were presumably fitted. The
+shape is wrong: the model is flat to 8 DPUs and then linear, because it assumes
+exactly 8-way interleaving and nothing else, whereas the hardware rises
+smoothly and saturates near 16 DPUs at about 4.8 GB/s writing and 2.6 GB/s
+reading. In between it is 2 to 2.5 times pessimistic, and at a full rank it is
+1.8 times optimistic for writes.
+
+Putting transfers on the channel model is a change to the runner's design, not
+a fix: it would cost simulation speed and change every M4 number. Worth doing
+before any study whose conclusion depends on transfer time; not worth doing for
+kernel-time studies, which is what M4 measures.
+
 ## Method
 
 Both sides run the same kernel source with the same macros. `build_bimsa.sh`
@@ -102,7 +177,9 @@ iteration plus one quantum of overhead. 22 is 2 x 11, the issue interval.
 - One workload. BIMSA at 16 short pairs is not a claim about every kernel, and
   the error is known to move with the input: the same comparison at a single
   pair gives -6.2% rather than -4.9%.
-- One DPU. Nothing here tests the channel, rank or host-transfer models.
+- The channel, rank and host-transfer models are still untested end to end,
+  because the runner does not use them. The DPU sweep above shows only that
+  adding DPUs does not perturb kernel time.
 - `PERF_TIER=3` measures the kernel as a whole. Which part of it the model gets
   wrong is a tier-1 or tier-2 question, not answered here.
 - At 16 tasklets each tasklet's probe window covers about half the launch, on
