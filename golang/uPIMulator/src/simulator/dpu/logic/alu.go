@@ -77,43 +77,8 @@ func (this *Alu) Addc(operand1 int64, operand2 int64, carry_flag bool) (int64, b
 }
 
 func (this *Alu) Sub(operand1 int64, operand2 int64) (int64, bool, bool) {
-	config_loader := new(misc.ConfigLoader)
-	config_loader.Init()
-
-	mram_data_width := config_loader.MramDataWidth()
-
-	word1 := new(word.Word)
-	word1.Init(mram_data_width)
-	word1.SetValue(operand1)
-
-	word2 := new(word.Word)
-	word2.Init(mram_data_width)
-	word2.SetValue(operand2)
-
-	var result int64
-	var carry bool
-	if word1.Value(word.UNSIGNED) >= word2.Value(word.UNSIGNED) {
-		result = word1.Value(word.UNSIGNED) - word2.Value(word.UNSIGNED)
-		carry = false
-	} else {
-		result = this.Pow2(mram_data_width) + word1.Value(word.UNSIGNED) - word2.Value(word.UNSIGNED)
-		carry = true
-	}
-
-	result_word := new(word.Word)
-	result_word.Init(mram_data_width)
-	result_word.SetValue(result)
-
-	var overflow bool
-	if word1.SignBit() && !word2.SignBit() && result_word.SignBit() {
-		overflow = true
-	} else if !word1.SignBit() && word2.SignBit() && !result_word.SignBit() {
-		overflow = true
-	} else {
-		overflow = false
-	}
-
-	return result, carry, overflow
+	// Nothing is borrowed into a plain subtract, which is a set carry.
+	return this.Subc(operand1, operand2, true)
 }
 
 func (this *Alu) Subc(operand1 int64, operand2 int64, carry_flag bool) (int64, bool, bool) {
@@ -130,38 +95,31 @@ func (this *Alu) Subc(operand1 int64, operand2 int64, carry_flag bool) (int64, b
 	word2.Init(mram_data_width)
 	word2.SetValue(operand2)
 
-	var result int64
-	var carry bool
-	if carry_flag {
-		if word1.Value(word.UNSIGNED)+1 >= word2.Value(word.UNSIGNED) {
-			result = word1.Value(word.UNSIGNED) - word2.Value(word.UNSIGNED) - 1
-			carry = false
-		} else {
-			result = this.Pow2(mram_data_width) + word1.Value(word.UNSIGNED) - word2.Value(word.UNSIGNED) - 1
-			carry = true
-		}
-	} else {
-		if word1.Value(word.UNSIGNED) >= word2.Value(word.UNSIGNED) {
-			result = word1.Value(word.UNSIGNED) - word2.Value(word.UNSIGNED)
-			carry = false
-		} else {
-			result = this.Pow2(mram_data_width) + word1.Value(word.UNSIGNED) - word2.Value(word.UNSIGNED)
-			carry = true
-		}
+	// The carry flag is the complement of the borrow, which is what the
+	// hardware reports: a set carry means the subtraction did not borrow.
+	// runner/tests/alu checks this against UPMEM's functional simulator.
+	var borrow_in int64
+	if !carry_flag {
+		borrow_in = 1
 	}
+
+	result := word1.Value(word.UNSIGNED) - word2.Value(word.UNSIGNED) - borrow_in
+
+	borrow_out := result < 0
+	if borrow_out {
+		result += this.Pow2(mram_data_width)
+	}
+
+	carry := !borrow_out
 
 	result_word := new(word.Word)
 	result_word.Init(mram_data_width)
 	result_word.SetValue(result)
 
-	var overflow bool
-	if word1.SignBit() && !word2.SignBit() && result_word.SignBit() {
-		overflow = true
-	} else if !word1.SignBit() && word2.SignBit() && !result_word.SignBit() {
-		overflow = true
-	} else {
-		overflow = false
-	}
+	// A signed subtraction overflows when the operands differ in sign and the
+	// result does not keep the sign of the first one.
+	overflow := word1.SignBit() != word2.SignBit() &&
+		result_word.SignBit() != word1.SignBit()
 
 	return result, carry, overflow
 }
@@ -345,9 +303,7 @@ func (this *Alu) Xor(operand1 int64, operand2 int64) int64 {
 	result_word := new(word.Word)
 	result_word.Init(mram_data_width)
 	for i := 0; i < mram_data_width; i++ {
-		if !word1.Bit(i) && word2.Bit(i) {
-			result_word.SetBit(i)
-		} else if word1.Bit(i) && word2.Bit(i) {
+		if word1.Bit(i) != word2.Bit(i) {
 			result_word.SetBit(i)
 		} else {
 			result_word.ClearBit(i)
@@ -374,12 +330,10 @@ func (this *Alu) Nxor(operand1 int64, operand2 int64) int64 {
 	result_word := new(word.Word)
 	result_word.Init(mram_data_width)
 	for i := 0; i < mram_data_width; i++ {
-		if !word1.Bit(i) && word2.Bit(i) {
-			result_word.ClearBit(i)
-		} else if word1.Bit(i) && word2.Bit(i) {
-			result_word.ClearBit(i)
-		} else {
+		if word1.Bit(i) == word2.Bit(i) {
 			result_word.SetBit(i)
+		} else {
+			result_word.ClearBit(i)
 		}
 	}
 
@@ -495,9 +449,25 @@ func (this *Alu) Lsl1(operand int64, shift int64) int64 {
 	return result_word.Value(word.UNSIGNED)
 }
 
+// Lsl1x is Lslx with ones shifted in instead of zeroes. A shift of zero moves
+// the whole operand past the word, so only the ones are left. Checked against
+// UPMEM's functional simulator by runner/tests/alu.
 func (this *Alu) Lsl1x(operand int64, shift int64) int64 {
-	err := errors.New("lsl1x is not yet implemented")
-	panic(err)
+	config_loader := new(misc.ConfigLoader)
+	config_loader.Init()
+
+	mram_data_width := config_loader.MramDataWidth()
+
+	shift_word := new(word.Word)
+	shift_word.Init(mram_data_width)
+	shift_word.SetValue(shift)
+	shift_value := shift_word.BitSlice(word.UNSIGNED, 0, 5)
+
+	if shift_value == 0 {
+		return this.Pow2(mram_data_width) - 1
+	} else {
+		return this.Lsr1(operand, int64(mram_data_width)-shift_value)
+	}
 }
 
 func (this *Alu) Lslx(operand int64, shift int64) int64 {
@@ -586,9 +556,23 @@ func (this *Alu) Lsr1(operand int64, shift int64) int64 {
 	return result_word.Value(word.UNSIGNED)
 }
 
+// Lsr1x is Lsrx with ones shifted in instead of zeroes.
 func (this *Alu) Lsr1x(operand int64, shift int64) int64 {
-	err := errors.New("lsr1x is not yet implemented")
-	panic(err)
+	config_loader := new(misc.ConfigLoader)
+	config_loader.Init()
+
+	mram_data_width := config_loader.MramDataWidth()
+
+	shift_word := new(word.Word)
+	shift_word.Init(mram_data_width)
+	shift_word.SetValue(shift)
+	shift_value := shift_word.BitSlice(word.UNSIGNED, 0, 5)
+
+	if shift_value == 0 {
+		return this.Pow2(mram_data_width) - 1
+	} else {
+		return this.Lsl1(operand, int64(mram_data_width)-shift_value)
+	}
 }
 
 func (this *Alu) Lsrx(operand int64, shift int64) int64 {
@@ -633,7 +617,6 @@ func (this *Alu) Rol(operand int64, shift int64) int64 {
 			} else {
 				result_word.ClearBit(i)
 			}
-			result_word.SetBit(i)
 		} else {
 			if word_.Bit(i - int(shift_value)) {
 				result_word.SetBit(i)
@@ -674,7 +657,6 @@ func (this *Alu) Ror(operand int64, shift int64) int64 {
 			} else {
 				result_word.ClearBit(i)
 			}
-			result_word.SetBit(i)
 		} else {
 			if word_.Bit(i + int(shift_value)) {
 				result_word.SetBit(i)

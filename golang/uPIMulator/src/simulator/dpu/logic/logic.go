@@ -1203,19 +1203,15 @@ func (this *Logic) ExecuteRrif(instruction_ *instruction.Instruction) {
 	this.SetFlags(instruction_, result, carry)
 }
 
-func (this *Logic) ExecuteRrr(instruction_ *instruction.Instruction) {
-	if _, found := instruction_.RrrOpCodes()[instruction_.OpCode()]; !found {
-		err := errors.New("op code is not a valid RRR op code")
-		panic(err)
-	} else if instruction_.Suffix() != instruction.RRR {
-		err := errors.New("suffix is not RRR")
-		panic(err)
-	}
-
+// AluRrr runs the RRR op code on two register operands. ExecuteRrr and
+// ExecuteSRrr share it so the two cannot drift: they differ only in where the
+// result is written, not in how it is computed.
+func (this *Logic) AluRrr(
+	instruction_ *instruction.Instruction,
+	ra int64,
+	rb int64,
+) (int64, bool) {
 	thread := this.scoreboard[instruction_]
-
-	ra := thread.RegFile().ReadSrcReg(instruction_.Ra(), word.SIGNED)
-	rb := thread.RegFile().ReadSrcReg(instruction_.Rb(), word.SIGNED)
 
 	var result int64
 	var carry bool
@@ -1341,6 +1337,27 @@ func (this *Logic) ExecuteRrr(instruction_ *instruction.Instruction) {
 		err := errors.New("op code is not valid")
 		panic(err)
 	}
+
+	return result, carry
+}
+
+func (this *Logic) ExecuteRrr(instruction_ *instruction.Instruction) {
+	if _, found := instruction_.RrrOpCodes()[instruction_.OpCode()]; !found {
+		err := errors.New("op code is not a valid RRR op code")
+		panic(err)
+	} else if instruction_.Suffix() != instruction.RRR {
+		err := errors.New("suffix is not RRR")
+		panic(err)
+	}
+
+	thread := this.scoreboard[instruction_]
+
+	ra := thread.RegFile().ReadSrcReg(instruction_.Ra(), word.SIGNED)
+	rb := thread.RegFile().ReadSrcReg(instruction_.Rb(), word.SIGNED)
+
+	result, carry := this.AluRrr(instruction_, ra, rb)
+
+	op_code := instruction_.OpCode()
 
 	thread.RegFile().ClearConditions()
 
@@ -1657,10 +1674,10 @@ func (this *Logic) ExecuteAddRrrci(instruction_ *instruction.Instruction) {
 
 	op_code := instruction_.OpCode()
 	if op_code == instruction.ADD {
-		result, carry, _ = this.alu.Add(ra, rb)
+		result, carry, overflow = this.alu.Add(ra, rb)
 	} else if op_code == instruction.ADDC {
 		carry_flag := thread.RegFile().ReadFlagReg(instruction.CARRY)
-		result, carry, _ = this.alu.Addc(ra, rb, carry_flag)
+		result, carry, overflow = this.alu.Addc(ra, rb, carry_flag)
 	} else {
 		err := errors.New("op code is not valid")
 		panic(err)
@@ -1781,7 +1798,7 @@ func (this *Logic) ExecuteAsrRrrci(instruction_ *instruction.Instruction) {
 	}
 
 	thread.RegFile().ClearConditions()
-	this.SetLogNzCc(instruction_, ra, result)
+	this.SetShiftNzCc(instruction_, ra, rb, result)
 
 	thread.RegFile().WriteGpReg(instruction_.Rc(), result)
 
@@ -2933,10 +2950,10 @@ func (this *Logic) ExecuteAddZrrci(instruction_ *instruction.Instruction) {
 
 	op_code := instruction_.OpCode()
 	if op_code == instruction.ADD {
-		result, carry, _ = this.alu.Add(ra, rb)
+		result, carry, overflow = this.alu.Add(ra, rb)
 	} else if op_code == instruction.ADDC {
 		carry_flag := thread.RegFile().ReadFlagReg(instruction.CARRY)
-		result, carry, _ = this.alu.Addc(ra, rb, carry_flag)
+		result, carry, overflow = this.alu.Addc(ra, rb, carry_flag)
 	} else {
 		err := errors.New("op code is not valid")
 		panic(err)
@@ -3053,7 +3070,7 @@ func (this *Logic) ExecuteAsrZrrci(instruction_ *instruction.Instruction) {
 	}
 
 	thread.RegFile().ClearConditions()
-	this.SetLogNzCc(instruction_, ra, result)
+	this.SetShiftNzCc(instruction_, ra, rb, result)
 
 	if thread.RegFile().ReadConditionReg(instruction_.Condition()) {
 		thread.RegFile().WritePcReg(instruction_.Pc().Value())
@@ -3661,9 +3678,45 @@ func (this *Logic) ExecuteSRrif(instruction_ *instruction.Instruction) {
 	this.SetFlags(instruction_, result, carry)
 }
 
+// ExecuteSRrr is the RRR form with a register-pair destination: the 32-bit
+// result goes to the odd register and the extension to the even one. The
+// soft-float routines reach it through lsr.u dc, ra, rb.
 func (this *Logic) ExecuteSRrr(instruction_ *instruction.Instruction) {
-	err := errors.New("ExecuteSRrr is not yet implemented")
-	panic(err)
+	if _, found := instruction_.RrrOpCodes()[instruction_.OpCode()]; !found {
+		err := errors.New("op code is not a valid RRR op code")
+		panic(err)
+	} else if instruction_.Suffix() != instruction.S_RRR && instruction_.Suffix() != instruction.U_RRR {
+		err := errors.New("suffix is not S_RRR nor U_RRR")
+		panic(err)
+	} else if instruction_.OpCode() == instruction.CALL {
+		// A call writes a return address to one register and jumps. There is
+		// nothing for the pair's second half to hold.
+		err := errors.New("call has no S_RRR nor U_RRR form")
+		panic(err)
+	}
+
+	thread := this.scoreboard[instruction_]
+
+	ra := thread.RegFile().ReadSrcReg(instruction_.Ra(), word.SIGNED)
+	rb := thread.RegFile().ReadSrcReg(instruction_.Rb(), word.SIGNED)
+
+	result, carry := this.AluRrr(instruction_, ra, rb)
+
+	thread.RegFile().ClearConditions()
+
+	var even int64
+	var odd int64
+	if instruction_.Suffix() == instruction.S_RRR {
+		even, odd = this.alu.SignedExtension(result)
+	} else {
+		even, odd = this.alu.UnsignedExtension(result)
+	}
+
+	thread.RegFile().WritePairReg(instruction_.Dc(), even, odd)
+
+	thread.RegFile().IncrementPcReg()
+
+	this.SetFlags(instruction_, result, carry)
 }
 
 func (this *Logic) ExecuteSRrrc(instruction_ *instruction.Instruction) {
@@ -4987,6 +5040,18 @@ func (this *Logic) ExecuteErid(instruction_ *instruction.Instruction) {
 	thread.RegFile().IncrementPcReg()
 }
 
+// AlignDmaAddress drops the low bits of a DMA address. The hardware moves whole
+// 8-byte words and ignores them, so an unaligned mram_read or mram_write acts on
+// the word containing the address, not on the byte itself. Honouring the low
+// bits instead shifts the transfer by a few bytes and loses the data silently:
+// BIMSA writes its result with an 8-byte transfer to an address 4 mod 8, so
+// every distance it reported came back as zero.
+//
+// runner/tests/alu/mram.c checks this against UPMEM's functional simulator.
+func (this *Logic) AlignDmaAddress(address int64) int64 {
+	return address - address%this.min_access_granularity
+}
+
 func (this *Logic) ExecuteDmaRri(instruction_ *instruction.Instruction) {
 	if _, found := instruction_.DmaRriOpCodes()[instruction_.OpCode()]; !found {
 		err := errors.New("op code is not a valid DMA_RRI op code")
@@ -5030,12 +5095,12 @@ func (this *Logic) ExecuteLdmaDmaRri(instruction_ *instruction.Instruction) {
 	wram_end_address := config_loader.WramOffset() + config_loader.WramSize()
 	wram_end_address_width := int(math.Floor(math.Log2(float64(wram_end_address))) + 1)
 	wram_mask := this.Pow2(wram_end_address_width) - 1
-	wram_address := this.alu.And(ra, wram_mask)
+	wram_address := this.AlignDmaAddress(this.alu.And(ra, wram_mask))
 
 	mram_end_address := config_loader.MramOffset() + config_loader.MramSize()
 	mram_end_address_width := int(math.Floor(math.Log2(float64(mram_end_address))) + 1)
 	mram_mask := this.Pow2(mram_end_address_width) - 1
-	mram_address := this.alu.And(rb, mram_mask)
+	mram_address := this.AlignDmaAddress(this.alu.And(rb, mram_mask))
 
 	size := (1 + this.alu.And(imm+this.alu.And(this.alu.Lsr(ra, 24), 255), 255)) * this.min_access_granularity
 
@@ -5070,12 +5135,12 @@ func (this *Logic) ExecuteSdmaDmaRri(instruction_ *instruction.Instruction) {
 	wram_end_address := config_loader.WramOffset() + config_loader.WramSize()
 	wram_end_address_width := int(math.Floor(math.Log2(float64(wram_end_address))) + 1)
 	wram_mask := this.Pow2(wram_end_address_width) - 1
-	wram_address := this.alu.And(ra, wram_mask)
+	wram_address := this.AlignDmaAddress(this.alu.And(ra, wram_mask))
 
 	mram_end_address := config_loader.MramOffset() + config_loader.MramSize()
 	mram_end_address_width := int(math.Floor(math.Log2(float64(mram_end_address))) + 1)
 	mram_mask := this.Pow2(mram_end_address_width) - 1
-	mram_address := this.alu.And(rb, mram_mask)
+	mram_address := this.AlignDmaAddress(this.alu.And(rb, mram_mask))
 
 	size := (1 + this.alu.And(imm+this.alu.And(this.alu.Lsr(ra, 24), 255), 255)) * this.min_access_granularity
 
@@ -5127,7 +5192,7 @@ func (this *Logic) SetAddNzCc(
 		thread.RegFile().SetCondition(cc.NOV)
 	}
 
-	if result >= 0 {
+	if !this.IsNegative(result) {
 		thread.RegFile().SetCondition(cc.PL)
 	} else {
 		thread.RegFile().SetCondition(cc.MI)
@@ -5328,7 +5393,7 @@ func (this *Logic) SetExtSubSetCc(
 		thread.RegFile().SetCondition(cc.NOV)
 	}
 
-	if result >= 0 {
+	if !this.IsNegative(result) {
 		thread.RegFile().SetCondition(cc.PL)
 	} else {
 		thread.RegFile().SetCondition(cc.MI)
@@ -5397,20 +5462,64 @@ func (this *Logic) SetExtSubSetCc(
 		thread.RegFile().SetCondition(cc.GES)
 	}
 
-	if carry || thread.RegFile().ReadFlagReg(instruction.ZERO) {
+	this.SetExtendedSubConditions(instruction_, result, carry, overflow)
+}
+
+// IsNegative reports whether a result is negative as a machine word. The ALU
+// returns results as the unsigned image of the word, so a plain "result < 0"
+// is never true and every mi/xles condition would be dead.
+func (this *Logic) IsNegative(result int64) bool {
+	config_loader := new(misc.ConfigLoader)
+	config_loader.Init()
+
+	result_word := new(word.Word)
+	result_word.Init(config_loader.MramDataWidth())
+	result_word.SetValue(result)
+
+	return result_word.SignBit()
+}
+
+// SetExtendedSubConditions sets the four x-conditions of a subtraction. They
+// describe a value wider than one word: the preceding instruction's zero flag
+// covers the low word, this instruction covers the high one. The soft-float
+// routines compare doubles with them, so a wrong answer here silently returns
+// the wrong double rather than failing.
+//
+// The reference is UPMEM's own functional simulator; runner/tests/alu checks
+// every case against it.
+func (this *Logic) SetExtendedSubConditions(
+	instruction_ *instruction.Instruction,
+	result int64,
+	carry bool,
+	overflow bool,
+) {
+	thread := this.scoreboard[instruction_]
+
+	config_loader := new(misc.ConfigLoader)
+	config_loader.Init()
+
+	result_word := new(word.Word)
+	result_word.Init(config_loader.MramDataWidth())
+	result_word.SetValue(result)
+
+	// The wide value is zero only when every word of it is. Note result is the
+	// unsigned image of the word, so its sign has to come from the sign bit.
+	extended_zero := result == 0 && thread.RegFile().ReadFlagReg(instruction.ZERO)
+
+	// carry means the subtraction did not borrow, so operand1 is the larger
+	// unsigned value when it is set and the two are not equal.
+	if carry && !extended_zero {
+		thread.RegFile().SetCondition(cc.XGTU)
+	} else {
 		thread.RegFile().SetCondition(cc.XLEU)
 	}
 
-	if carry || !thread.RegFile().ReadFlagReg(instruction.ZERO) {
-		thread.RegFile().SetCondition(cc.XGTU)
-	}
-
-	if thread.RegFile().ReadFlagReg(instruction.ZERO) && (result < 0 || overflow) {
-		thread.RegFile().SetCondition(cc.XLES)
-	}
-
-	if !thread.RegFile().ReadFlagReg(instruction.ZERO) && (result >= 0 || overflow) {
+	// Signed, operand1 is the larger when the result's sign agrees with the
+	// overflow, and the two are not equal.
+	if result_word.SignBit() == overflow && !extended_zero {
 		thread.RegFile().SetCondition(cc.XGTS)
+	} else {
+		thread.RegFile().SetCondition(cc.XLES)
 	}
 }
 
@@ -5439,7 +5548,7 @@ func (this *Logic) SetImmShiftNzCc(
 		thread.RegFile().SetCondition(cc.O)
 	}
 
-	if result >= 0 {
+	if !this.IsNegative(result) {
 		thread.RegFile().SetCondition(cc.PL)
 	} else {
 		thread.RegFile().SetCondition(cc.MI)
@@ -5464,6 +5573,32 @@ func (this *Logic) SetImmShiftNzCc(
 	}
 }
 
+// SetShiftNzCc sets the conditions of a shift whose shift amount comes from a
+// register. It is SetImmShiftNzCc plus sh32/nsh32, which only this form can
+// use: the immediate form carries a 5-bit shift, so its bit 5 is always zero.
+//
+// sh32 is bit 5 of the shift operand, not "shift amount >= 32". Verified
+// against UPMEM's own functional simulator: a shift of 64..71 clears sh32
+// exactly as a shift of 0..7 does. The soft-float routines branch on sh32 to
+// pick the >=32 half of a 64-bit shift, so a missing sh32 silently produces a
+// wrong double.
+func (this *Logic) SetShiftNzCc(
+	instruction_ *instruction.Instruction,
+	operand1 int64,
+	shift int64,
+	result int64,
+) {
+	this.SetImmShiftNzCc(instruction_, operand1, result)
+
+	thread := this.scoreboard[instruction_]
+
+	if (shift>>5)&1 == 1 {
+		thread.RegFile().SetCondition(cc.SH32)
+	} else {
+		thread.RegFile().SetCondition(cc.NSH32)
+	}
+}
+
 func (this *Logic) SetLogNzCc(instruction_ *instruction.Instruction, operand1 int64, result int64) {
 	thread := this.scoreboard[instruction_]
 
@@ -5479,7 +5614,7 @@ func (this *Logic) SetLogNzCc(instruction_ *instruction.Instruction, operand1 in
 		thread.RegFile().SetCondition(cc.XNZ)
 	}
 
-	if result >= 0 {
+	if !this.IsNegative(result) {
 		thread.RegFile().SetCondition(cc.PL)
 	} else {
 		thread.RegFile().SetCondition(cc.MI)
@@ -5582,7 +5717,7 @@ func (this *Logic) SetSubNzCc(
 		thread.RegFile().SetCondition(cc.NOV)
 	}
 
-	if result >= 0 {
+	if !this.IsNegative(result) {
 		thread.RegFile().SetCondition(cc.PL)
 	} else {
 		thread.RegFile().SetCondition(cc.MI)
@@ -5645,21 +5780,7 @@ func (this *Logic) SetSubNzCc(
 		thread.RegFile().SetCondition(cc.GES)
 	}
 
-	if carry || thread.RegFile().ReadFlagReg(instruction.ZERO) {
-		thread.RegFile().SetCondition(cc.XLEU)
-	}
-
-	if carry || !thread.RegFile().ReadFlagReg(instruction.ZERO) {
-		thread.RegFile().SetCondition(cc.XGTU)
-	}
-
-	if thread.RegFile().ReadFlagReg(instruction.ZERO) && (result < 0 || overflow) {
-		thread.RegFile().SetCondition(cc.XLES)
-	}
-
-	if !thread.RegFile().ReadFlagReg(instruction.ZERO) && (result >= 0 || overflow) {
-		thread.RegFile().SetCondition(cc.XGTS)
-	}
+	this.SetExtendedSubConditions(instruction_, result, carry, overflow)
 }
 
 func (this *Logic) SetSubSetCc(

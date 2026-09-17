@@ -1,21 +1,25 @@
 # Double-precision regression test
 
-Same kernel source, two simulators. UPMEM's own functional simulator gets every
-case right; uPIMulator gets every case wrong.
+Same kernel source, two simulators. Both now agree on every case.
 
-| Operation | UPMEM functional simulator | uPIMulator |
+| Operation | Expected | Was |
 |---|---|---|
 | `(uint32_t)(double)152` | 152 | 0 |
 | `152 + 2.0` | 154 | 0 |
 | `152 - 2.0` | 150 | 0 |
 | `152 * 0.8` | 121 | 3435973836 |
 
-This blocks BIMSA. Its kernel sizes the wavefront buffers with
+This used to block BIMSA. Its kernel sizes the wavefront buffers with
 `max_distance = 2 * longest_seq * MAX_ERROR`, a double multiply. The garbage
-result makes the computed MRAM footprint enormous, so BIMSA's own guard
-(`ma_tasks + NR_TASKLETS * QUEUE_SZ > MRAM_LIMIT`) rejects the workload and the
-kernel returns before writing anything. Every buffer the host reads back is
-zero, which looks like a transfer failure but is not one.
+result made the computed MRAM footprint enormous, so BIMSA's own guard
+(`ma_tasks + NR_TASKLETS * QUEUE_SZ > MRAM_LIMIT`) rejected the workload and the
+kernel returned before writing anything.
+
+The root cause was `sh32`: the condition is bit 5 of the shift operand, and no
+instruction in uPIMulator ever set it, so every 64-bit shift in the soft-float
+routines took the shift<32 path. Fixing it exposed ten more defects in the same
+layers; `runner/tests/alu` covers them all and is the broader test. Keep this one
+because it is the shortest statement of the symptom.
 
 None of the 13 PrIM benchmarks uses double precision, so uPIMulator's published
 validation never exercised this path.

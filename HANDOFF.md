@@ -1,6 +1,6 @@
 # Handoff: hardware-vs-simulator validation study
 
-State as of 2026-09-16. Read this before touching anything.
+State as of 2026-09-17. Read this before touching anything.
 
 ## Goal
 
@@ -21,87 +21,82 @@ operation served by simulation. That part works. BIMSA first, GIMSA next.
 | M1 simulator as a library | **Done** |
 | M2 memory and speed | **Done** (147 MB -> 2.5 MB per DPU; 2.26x faster) |
 | M3 libdpu shim | **Done**, BIMSA runs end to end |
-| M4 validation study | **Blocked** by the bug below |
+| M4 validation study | **Unblocked.** BIMSA now returns correct scores under the simulator. Not yet measured against hardware |
 | M5 architecture exploration | Not started |
 
-## THE BLOCKER: double-precision arithmetic is wrong
+## The former blocker: eleven functional bugs, all fixed
 
-Same kernel source, two simulators, no hardware involved in either run:
+Double-precision arithmetic was wrong, which made BIMSA's own MRAM guard reject
+its workload. Chasing it found ten more defects in the same layers. All are
+fixed, and `runner/tests/alu/run.sh` holds them fixed by diffing 1176 results
+against UPMEM's own functional simulator.
 
-| Operation | UPMEM functional simulator | uPIMulator |
-|---|---|---|
-| `(uint32_t)(double)152` | 152 | **0** |
-| `152 + 2.0` | 154 | **0** |
-| `152 - 2.0` | 150 | **0** |
-| `152 * 0.8` | 121 | **3435973836** |
+| Defect | Effect |
+|---|---|
+| DMA honoured the low 3 bits of both addresses; the hardware ignores them | every unaligned transfer moved a few bytes, losing the data. This alone made BIMSA report distance 0 for alignments it had computed correctly |
+| `sh32`/`nsh32` were never set by any instruction | every 64-bit shift took the shift<32 path. This is what broke double precision |
+| `xor` returned its second operand; `nxor` returned the complement of it | every `xor` with a non-zero first operand was wrong |
+| `rol`/`ror` overwrote the rotated-in bits with ones | `rol`/`ror` behaved as `lsl1`/`lsr1` |
+| the subtract carry was the borrow; the hardware reports its complement | every `c`/`nc` condition after a subtract was inverted |
+| `sub`/`subc` computed signed overflow with the result's sign inverted | `xgts`/`xles` were wrong whenever the operands' signs differed |
+| `subc` used the wrong borrow test when a borrow came in | wrong carry out of a multi-word subtract |
+| `xgtu`/`xleu` were both set when the carry was set, and `xles` could never be set at all | 64-bit compares took the wrong branch |
+| `pl`/`mi` tested the unsigned image of the result, so `mi` could never be set | every negative result looked positive |
+| `ExecuteAddRrrci`/`ExecuteAddZrrci` discarded the ALU's overflow | `ov`/`nov` never fired after an add |
+| `lsl1x`, `lsr1x` and `ExecuteSRrr` were not implemented | panic on use |
 
-Reproduce both sides with `runner/tests/fp/` (see its README for the commands).
+**None of the 13 PrIM benchmarks uses double precision**, and PrIM never hits an
+unaligned DMA either, so uPIMulator's published validation never exercised any
+of this. VA still passes, byte-for-byte, after every change.
 
-**Why it blocks BIMSA.** BIMSA's kernel sizes its wavefront buffers with
-`max_distance = 2 * longest_seq * MAX_ERROR`, a double multiply. The garbage
-value inflates the computed MRAM footprint, so BIMSA's own guard
-(`ma_tasks + NR_TASKLETS * QUEUE_SZ > MRAM_LIMIT`, `dpu/bimsa.c:223`) rejects the
-workload and the kernel returns before writing anything. Every buffer the host
-reads back is zero, which looks like a broken transfer but is not one. I verified
-the layout arithmetic independently: it should pass at 1,876,704 against a limit
-of 64,000,000, and my replication reproduced the observed transfer offsets exactly.
+### How to find the next one
 
-**None of the 13 PrIM benchmarks uses double precision**, so uPIMulator's
-published validation never exercised this path. Confirmed by grepping every
-compiled PrIM kernel for `__muldf3`/`__adddf3`/`__floatunsidf`/`__fixdfsi`: zero hits.
+The method that found all eleven, in order of cost:
 
-## Next steps (the decision was: fix it properly)
+1. Write the smallest kernel that shows the difference. Compile it twice: once
+   with plain `dpu-upmem-dpurte-clang` for the reference, once with `-S -g0
+   -DNR_THREADS=24` and uPIMulator's bundled headers for the linker.
+2. Run the reference under `UPMEM_PROFILE=backend=simulator`. It is the ground
+   truth for anything the ISA documentation does not state, and it touches no
+   hardware. Do not guess semantics: `sh32` turned out to be bit 5 of the shift
+   operand, not "shift >= 32", and a shift of 64 proves it.
+3. Run the same kernel under `UPIM_TRACE=1` (instruction per cycle) or
+   `UPIM_TRACE=2` (with the register file) and diff. `UPIM_TRACE` is the
+   simulator's own `--verbose`, not the shim's call trace (`UPIM_VERBOSE`).
+4. Reduce the level-2 trace to one line per instruction showing only the
+   registers that changed. A 39K-instruction BIMSA run becomes readable, and
+   that is how the lost distance was traced to a single `sdma`.
+5. Compare against `dpu-objdump -d` of the reference ELF to see which branch
+   the hardware would have taken.
 
-Root cause is **not** pinned down. What is known:
+`go run ./cmd/parsecheck <file.S>` reports the first line the linker's grammar
+cannot accept. The linker itself only says "stack are not stmts" after building
+the whole SDK, which is far too slow to bisect against. `hash` and
+`.section .stack_sizes` are the two known gaps.
 
-- The soft-float routines are linked in and reachable
-  (`__floatunsidf` at 395976, `__muldf3` at 397704, `__adddf3` at 401040 in a
-  test image).
-- `simulator/dpu/logic/logic.go` has **25 handlers that panic with
-  "is not yet implemented"**, including `ExecuteSRr`, `ExecuteSRrc`,
-  `ExecuteSRrci`, `ExecuteSRric`, `ExecuteSRrr`, `ExecuteSRrrc`, `ExecuteSRrrci`,
-  `ExecuteSRrri`, `ExecuteSRrrici`, `ExecuteSRirc`, `ExecuteSRirci`, `ExecuteR`,
-  `ExecuteRci`, `ExecuteZci`.
-- The suffixed pair-register forms (`move.s`, `move.u`, `lsr.u`, `lw.s`) that
-  soft-float uses map to several of those handlers.
-- **But that hypothesis is not proven**: the failing run produced wrong answers
-  without panicking, and PrIM emits `move.s`/`move.u` too (82 and 7 occurrences)
-  while VA runs correctly. So either those instructions are not reached on the
-  failing path, or something else is wrong.
+## Resume M4
 
-Suggested approach:
+BIMSA already runs correctly under the simulator. Verified 2026-09-17, against
+`backend=simulator` as the control, with `inputs/n2_l129_e2.seq`:
 
-1. Build the isolation kernel from `runner/tests/fp/kernel.c` and run it under
-   uPIMulator with `--verbose 1`, which prints the instruction executed each
-   cycle. Start with only the convert case (`OUT_CONV`), the simplest failure.
-2. Run the same kernel on `backend=simulator` (reference) and diff the behaviour
-   at the first divergence. The reference cannot dump a trace, so compare
-   register/memory outcomes at function boundaries
-   (`__floatunsidf` -> `__fixdfsi`) instead.
-3. Once the divergent instruction is identified, implement or correct its handler.
-   Note that `Encode`/`Decode` for a form can be right while `Execute` is missing;
-   check all three.
-4. Re-run `runner/tests/fp/` until all four cases match the reference, then
-   re-run BIMSA.
+- 1 tasklet, 1 pair: score 16, CIGARs valid, `CPU recovery for 0 pairs (0.00%)`.
+- 4 tasklets, 4 pairs: scores 16 16 16 16, "Results are equal".
+- Counters for the 1-pair run: 450838 logic cycles, 39033 instructions,
+  2705028 memory cycles.
 
-Do not "fix" this by changing BIMSA. Changing the workload changes what the study
-measures.
+What is left is the measurement itself:
 
-## After the fix: resume M4
-
-1. Build BIMSA's kernel and link it (see "Commands" below), then run BIMSA.
-   Expect correct scores and CIGARs.
-2. Reference hardware runs: build with `PERF=1 PERF_TIER=3 PERF_CYCLES=1
+1. Reference hardware runs: build with `PERF=1 PERF_TIER=3 PERF_CYCLES=1
    DYNAMIC=0 BATCH_SIZE=0`, run with `-e 1 -w 0`.
-3. Compare **`max` over tasklets of `PERF_ACC[t][PERF_S_TOTAL]`**, never the sum:
+2. Compare **`max` over tasklets of `PERF_ACC[t][PERF_S_TOTAL]`**, never the sum:
    one perfcounter register is shared by all 24 hardware threads, so the sum is
    about NR_TASKLETS x the wall clock. `PERF_CLK` reads 350000000 here.
-4. Simulator side: `UPIM_STATS=<file>` writes `logic_cycle`, `num_instructions`
+3. Simulator side: `UPIM_STATS=<file>` writes `logic_cycle`, `num_instructions`
    and `memory_cycle` per DPU at `dpu_free`.
-5. Do instruction counts first (`PERF_INSTRUCTIONS=1` vs `num_instructions`):
+4. Do instruction counts first (`PERF_INSTRUCTIONS=1` vs `num_instructions`):
    frequency independent, so it validates the functional model before the timing
    model.
-6. **Gate every data point on `CPU recovery for 0 pairs (0.00%)`.** Also only
+5. **Gate every data point on `CPU recovery for 0 pairs (0.00%)`.** Also only
    `-b 0 -e 1` runs are analysable: `global_pair` in the kernel is a `.data`
    global that is never reset per launch.
 
@@ -143,6 +138,15 @@ the only commands allowed to ask for `backend=hw`, and they must be deliberate.
     # isolation proof
     uPIMulator/runner/scripts/test_isolation.sh
 
+    # ALU / condition-code / DMA conformance against UPMEM's own simulator
+    uPIMulator/runner/tests/alu/run.sh
+
+    # double-precision regression
+    uPIMulator/runner/tests/fp/README.md has the commands
+
+    # first line the linker's grammar rejects in a .S file
+    cd uPIMulator/golang/uPIMulator/src && go run ./cmd/parsecheck <file.S>
+
     # link an arbitrary kernel into a program directory
     ./build/uPIMulator --root_dirpath $PWD --bin_dirpath <out> \
         --benchmark <NAME> --benchmark_asm <kernel>.c.o --link_only true \
@@ -151,7 +155,11 @@ the only commands allowed to ask for `backend=hw`, and they must be deliberate.
     # run a compiled UPMEM host binary on the simulator
     uPIMulator/runner/upimulator run --program-dir <out> --tasklets N --dpus M \
         [--verbose] [--trace-hardware] -- ./host args
-    # UPIM_STATS=- prints counters; UPIM_DUMP_LOG=1 prints the DPU's own log
+    # UPIM_STATS=<file> writes counters; UPIM_STATS=- prints them
+    # UPIM_DUMP_LOG=1 prints the DPU's own log
+    # UPIM_TRACE=1 traces one instruction per cycle, 2 adds the register file.
+    # This is the simulator's own --verbose. --verbose / UPIM_VERBOSE is the
+    # shim's trace of intercepted calls, which is a different thing.
 
 BIMSA's kernel flags come from `make -n` in `bimsa/upmem`; add `-S -g0
 -DNR_THREADS=24` and point the includes at uPIMulator's bundled SDK
@@ -160,8 +168,9 @@ BIMSA's kernel flags come from `make -n` in `bimsa/upmem`; add `-S -g0
 ## Things already established -- do not re-derive
 
 - BIMSA's and GIMSA's kernels compile clean against uPIMulator's bundled headers
-  and use only supported directives and mnemonics. BIMSA is 3462 instructions,
-  inside the 4096 IRAM limit that hardware also imposes.
+  and use only supported mnemonics. BIMSA is 3462 instructions, inside the 4096
+  IRAM limit that hardware also imposes. One directive has to be stripped first;
+  see `.stack_sizes` below.
 - `DPU_MRAM_HEAP_POINTER_NAME` expands to `"__sys_used_mram_end"`, which the
   linker already publishes, so bulk transfers resolve through the ordinary
   constant table.
@@ -173,9 +182,23 @@ BIMSA's kernel flags come from `make -n` in `bimsa/upmem`; add `-S -g0
   carry hex literals with letter digits, which the linker's lexer cannot
   tokenize.
 - `-DNR_THREADS=24` is mandatory for the bundled SDK build.
+- The linker's grammar rejects `.section .stack_sizes`, which clang emits for
+  larger kernels and offers no flag to suppress. Strip it before linking:
+  `sed -i '/\.section\t\.stack_sizes/,+2d' <file>.c.o`. BIMSA needs this.
+- The UPMEM functional simulator (`backend=simulator`) is the reference for ISA
+  behaviour the documentation does not state. It links only against libc and
+  cannot reach a rank, so it is safe to run here, and it is what every
+  conformance test in `runner/tests/alu` diffs against.
 
 ## Fixes already made to upstream code
 
+- Eleven functional bugs in the ALU, the condition codes and the DMA. See the
+  table above and `runner/tests/alu/README.md`.
+- `cshared` reads `UPIM_TRACE` so a library run can produce an instruction
+  trace. Without it the runner could only trace intercepted calls, not the
+  kernel, and nothing inside a DPU was observable.
+- `ExecuteRrr`'s 40-way op-code dispatch moved to `AluRrr`, shared with the new
+  `ExecuteSRrr`, so the two cannot drift.
 - `EncodeSRrr` tested `suffix != RRR` when the dispatcher only routes
   `S_RRR`/`U_RRR` there, so it could never succeed; `DecodeSRrr` rejected the
   unsigned variant. Audited every Encode/Decode pair: only these two were wrong.

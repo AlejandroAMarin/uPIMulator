@@ -18,6 +18,8 @@ import "C"
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"sync"
 	"uPIMulator/src/api"
 	"uPIMulator/src/simulator/host"
@@ -83,6 +85,14 @@ func upim_set_create(program_dir *C.char, num_dpus C.int, num_tasklets C.int) C.
 
 	config := api.DefaultConfig()
 	config.NumTasklets = int(num_tasklets)
+
+	// UPIM_TRACE=1 prints the instruction executed each cycle, 2 adds the
+	// register file. This is the simulator's own --verbose, not the shim's
+	// call trace (UPIM_VERBOSE), and it is the only way to see inside a
+	// kernel that a library run executes.
+	if level, err := strconv.Atoi(os.Getenv("UPIM_TRACE")); err == nil {
+		config.Verbose = level
+	}
 
 	// One rank of the requested width. The simulator places no limit on how
 	// many DPUs a rank may hold.
