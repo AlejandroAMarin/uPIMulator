@@ -21,7 +21,7 @@ operation served by simulation. That part works. BIMSA first, GIMSA next.
 | M1 simulator as a library | **Done** |
 | M2 memory and speed | **Done** (147 MB -> 2.5 MB per DPU; 2.26x faster) |
 | M3 libdpu shim | **Done**, BIMSA runs end to end |
-| M4 validation study | **Kernel and transfer time validated.** Instructions match hardware exactly, kernel cycles inside ±5.5% over 1-16 tasklets and 1-16 DPUs, transfer time inside 4% on BIMSA |
+| M4 validation study | **Validated and tightened.** Instructions match hardware exactly; kernel cycles inside 1.3% over 1-16 DPUs and 3.5% over 1-16 tasklets; transfers inside 4% |
 | M5 architecture exploration | Not started |
 
 ## The former blocker: eleven functional bugs, all fixed
@@ -81,11 +81,11 @@ calibration behind it in `runner/tests/perf/README.md`.
 
 | tasklets | cycles, hardware | cycles, uPIMulator | error |
 |---|---|---|---|
-| 1 | 7502864 | 7138112 | -4.86% |
-| 2 | 7577552 | 7203856 | -4.93% |
-| 4 | 7761952 | 7351264 | -5.29% |
-| 8 | 8385904 | 8527168 | +1.68% |
-| 16 | 8385328 | 8598000 | +2.54% |
+| 1 | 7505888 | 7551984 | +0.61% |
+| 2 | 7549264 | 7582528 | +0.44% |
+| 4 | 7762160 | 7690064 | -0.93% |
+| 8 | 8371376 | 8613184 | +2.89% |
+| 16 | 8392320 | 8686496 | +3.51% |
 
 Instruction counts match exactly at 1 tasklet, +0.03% at 4, +0.12% at 16.
 
@@ -94,23 +94,21 @@ tasklets:
 
 | DPUs | cycles, hardware | cycles, uPIMulator | error |
 |---|---|---|---|
-| 1 | 1895792 | 1803312 | -4.88% |
-| 2 | 3897072 | 3690880 | -5.29% |
-| 4 | 7809728 | 7381760 | -5.48% |
-| 8 | 15599200 | 14763520 | -5.36% |
-| 16 | 31227904 | 29527040 | -5.45% |
+| 1 | 1895424 | 1898816 | +0.18% |
+| 2 | 3899728 | 3854384 | -1.16% |
+| 4 | 7795520 | 7708768 | -1.11% |
+| 8 | 15581664 | 15417536 | -1.05% |
+| 16 | 31224128 | 30835072 | -1.25% |
 
 The error does not grow with the DPU count. uPIMulator's per-DPU figure is
 identical to the digit from 2 DPUs up and the hardware's is constant to 0.2%,
 so DPUs are independent during a kernel on both and the model composes.
 
-**The timing model is trustworthy to about 5% on this workload.** It is
-optimistic when few tasklets run and pessimistic when the pipeline is full. At
-one tasklet the DPU issues every 11 cycles regardless, so the cycle count is
-11 x instructions plus stalls: hardware spends 12.33 cycles per instruction and
-uPIMulator 11.57, which means the 11-cycle interval is exact and about 43% of
-the MRAM stall is modelled. Above 8 tasklets the revolver hides the stalls and
-that error goes away.
+**The timing model is trustworthy to about 1% below 8 tasklets and 3.5% above.**
+It was 5% everywhere until the MRAM latency was fitted to the machine; see
+"MRAM latency" below. What is left at 8 and 16 tasklets is not latency -- the
+revolver hides that entirely once so many threads are ready -- but contention
+for the memory controller, which is a different part of the model.
 
 Hardware run-to-run variation is 0.04%, so the trend is real.
 
@@ -118,6 +116,34 @@ Hardware run-to-run variation is 0.04%, so the trend is real.
 
 The sweep builds both sides from the same `make -n` command, runs each, and
 gates every point on `CPU recovery for 0 pairs (0.00%)` and `Results are equal`.
+
+### MRAM latency, where the 5% was
+
+`runner/tests/perf/mram_sweep.sh` isolates it: with one tasklet a DMA blocks the
+only thread there is, so a cycle count is the latency itself. The model was
+wrong in two opposite directions, which is why the aggregate looked like a
+modest 5%: an 8-byte `mram_read` came out 20% fast and a 2 KB one 23% slow.
+
+Three things fixed it, and all three are worth knowing about:
+
+- **The DMA engine's startup was not modelled.** The hardware charges about 40
+  logic cycles before a transfer's first byte reaches memory, whatever its
+  size. `DmaStartupCycles`, now 42.
+- **`t_cl` was 32 and the machine says 22.** MRAM has no datasheet to read this
+  off, so upstream's value was a guess.
+- **`Dma.Cycle` never cycled its queues.** Harmless while every timer was zero;
+  the first non-zero startup stalled the DPU forever. Then, once cycling, only
+  the front entry counted down, which makes a timer an issue interval rather
+  than a latency -- so the startup serialised across tasklets and cost 5% at 16
+  of them. `CycleAll` fixes it.
+
+The row buffer is left alone deliberately. Hardware shows no difference between
+walking MRAM in order and jumping 64 KB each time, so activation and precharge
+are not observable from a DPU.
+
+Beware: `main.go`'s command-line defaults and `api.Config`'s must agree, or the
+API test fails comparing one path against the other. That is the test doing its
+job; change both.
 
 ### Before trusting a number from it
 
@@ -170,10 +196,10 @@ residual at every point.
 
 ### What is left
 
-1. More workloads and input sizes. The error moves with the input: the same
-   comparison at a single pair gives -6.2% rather than -4.9%.
-2. `PERF_TIER=1` or `2` to find which part of the kernel the model gets wrong.
-   Tier 3 only says the total is 5% out.
+1. The remaining 3% at 8 and 16 tasklets, which is memory controller contention
+   rather than latency.
+2. More workloads and input sizes.
+3. `PERF_TIER=1` or `2` to find which part of the kernel the model gets wrong.
 3. More than one rank or channel. The runner puts every DPU on one of each, so
    that topology is still untested.
 4. Transfers as simulated traffic rather than an analytic charge. Only needed
@@ -220,6 +246,9 @@ the only commands allowed to ask for `backend=hw`, and they must be deliberate.
 
     # ALU / condition-code / DMA conformance against UPMEM's own simulator
     uPIMulator/runner/tests/alu/run.sh
+
+    # MRAM latency, hardware vs the simulator
+    uPIMulator/runner/tests/perf/mram_sweep.sh
 
     # M4: BIMSA on hardware vs the simulator (asks for backend=hw deliberately)
     uPIMulator/runner/tests/perf/sweep.sh <input.seq> <seq-size> cycles 1 2 4 8 16

@@ -21,47 +21,76 @@ Measured 2026-09-17.
 
 **Cycle counts — the timing model.**
 
-| tasklets | hardware | uPIMulator | error |
+| tasklets | hardware | uPIMulator | error | before the MRAM fit |
+|---|---|---|---|---|
+| 1 | 7505888 | 7551984 | +0.61% | -4.86% |
+| 2 | 7549264 | 7582528 | +0.44% | -4.93% |
+| 4 | 7762160 | 7690064 | -0.93% | -5.29% |
+| 8 | 8371376 | 8613184 | +2.89% | +1.68% |
+| 16 | 8392320 | 8686496 | +3.51% | +2.54% |
+
+Hardware run-to-run variation is 0.04%, so these are real.
+
+## MRAM latency
+
+The -5% the first measurement found was all in MRAM. `mram_kernel.c` isolates
+it: with one tasklet a DMA blocks the only thread there is, so the stall is
+fully exposed and a cycle count is the latency itself rather than something the
+scheduler hid.
+
+    runner/tests/perf/mram_sweep.sh
+
+| bytes per DMA | hardware | before | after |
 |---|---|---|---|
-| 1 | 7502864 | 7138112 | -4.86% |
-| 2 | 7577552 | 7203856 | -4.93% |
-| 4 | 7761952 | 7351264 | -5.29% |
-| 8 | 8385904 | 8527168 | +1.68% |
-| 16 | 8385328 | 8598000 | +2.54% |
+| 8 | 208.7 | 167.6 (-20%) | 207.6 (-0.5%) |
+| 64 | 232.2 | 206.2 (-11%) | 235.3 (+1.3%) |
+| 256 | 341.8 | 340.5 (-0.4%) | 329.5 (-3.6%) |
+| 1024 | 714.2 | 877.5 (+23%) | 706.6 (-1.1%) |
+| 2048 | 1291.3 | 1594.6 (+23%) | 1209.5 (-6.3%) |
 
-uPIMulator is optimistic by about 5% when one or a few tasklets run, and
-pessimistic by about 2.5% once the pipeline is full. The whole range is inside
-±5.3%. Hardware run-to-run variation is 0.04%, so the trend is real and not
-noise.
+The model was wrong in two opposite directions at once, which is why the
+aggregate error looked like a modest 5%: too little fixed cost per DMA, and too
+much per byte. Three things fixed it.
 
-The sign change is where the model's remaining error lives. At one tasklet the
-DPU issues an instruction every 11 cycles no matter what, so a cycle count is
-11 x instructions plus stalls, and the stalls are almost entirely MRAM. Per
-instruction, hardware spends 12.33 cycles and uPIMulator 11.57: the model
-reproduces the 11-cycle issue interval exactly but only about 43% of the stall.
-Once 8 or more tasklets are ready the revolver hides the stalls behind other
-threads, that error disappears, and a smaller one of the opposite sign is left.
+**The DMA engine's startup was not modelled at all.** The hardware charges
+about 40 logic cycles before a transfer's first byte reaches memory, whatever
+its size, and the DRAM timings do not describe that. `DmaStartupCycles`, 42.
 
-## DPU sweep
+**`t_cl` was 32 and the machine says 22.** MRAM has no datasheet to read this
+off; upstream's 32 made a 2 KB `mram_read` 23% slower than the machine.
+
+**The DMA queue never counted its timer down.** `Dma.Cycle` serviced its queues
+but never cycled them. It went unnoticed while every timer was zero, and the
+first non-zero startup stalled the DPU forever. Then, once cycling, only the
+front entry counted down -- an issue interval, not a latency -- so the startup
+serialised across tasklets and cost 5% at 16 of them. `CycleAll` fixes that:
+several tasklets' transfers are in flight at once, as on the hardware.
+
+The row buffer is left alone. Hardware shows no difference at all between
+walking MRAM in order and jumping 64 KB each time, so its activation and
+precharge are not observable from a DPU; the model's remaining sensitivity to
+them is about 11 cycles, small beside the 42-cycle startup, and both patterns
+now sit within 6%.
+
+## DPU sweep## DPU sweep
 
 Same workload on each DPU (4 pairs, 4 tasklets), the DPU count swept and the
 input regenerated each time so the work per DPU stays fixed.
 
     runner/tests/perf/sweep_dpus.sh <base-pair.seq> 200 4 4 cycles 1 2 4 8 16
 
-| DPUs | pairs | hardware | uPIMulator | error | hw per DPU-tasklet | sim per DPU-tasklet |
-|---|---|---|---|---|---|---|
-| 1 | 4 | 1895792 | 1803312 | -4.88% | 473948 | 450828 |
-| 2 | 8 | 3897072 | 3690880 | -5.29% | 487134 | 461360 |
-| 4 | 16 | 7809728 | 7381760 | -5.48% | 488108 | 461360 |
-| 8 | 32 | 15599200 | 14763520 | -5.36% | 487475 | 461360 |
-| 16 | 64 | 31227904 | 29527040 | -5.45% | 487936 | 461360 |
+| DPUs | pairs | hardware | uPIMulator | error | before the MRAM fit |
+|---|---|---|---|---|---|
+| 1 | 4 | 1895424 | 1898816 | +0.18% | -4.88% |
+| 2 | 8 | 3899728 | 3854384 | -1.16% | -5.29% |
+| 4 | 16 | 7795520 | 7708768 | -1.11% | -5.48% |
+| 8 | 32 | 15581664 | 15417536 | -1.05% | -5.36% |
+| 16 | 64 | 31224128 | 30835072 | -1.25% | -5.45% |
 
-The error does not grow with the DPU count: it is the same -5% the tasklet
-sweep found. uPIMulator's per-DPU figure is identical to the digit from 2 DPUs
-up, and the hardware's is constant to 0.2%. DPUs share nothing during a kernel
-on either side, and the model composes accordingly. The 1-DPU point sits lower
-on both, which is the smaller total input, not the DPU count.
+The error does not grow with the DPU count. uPIMulator's per-DPU figure is
+identical to the digit from 2 DPUs up and the hardware's is constant to 0.2%:
+DPUs share nothing during a kernel on either side, and the model composes
+accordingly.
 
 **This does not test the channel model.** See below.
 

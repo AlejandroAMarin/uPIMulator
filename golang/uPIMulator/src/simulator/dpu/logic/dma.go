@@ -19,7 +19,7 @@ type Dma struct {
 	ready_q *dram.DmaCommandQ
 }
 
-func (this *Dma) Init() {
+func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
 	this.atomic = nil
 	this.iram = nil
 	this.operand_collector = nil
@@ -30,8 +30,15 @@ func (this *Dma) Init() {
 
 	max_num_tasklets := config_loader.MaxNumTasklets()
 
+	// The DMA engine's own startup, in logic cycles, before a transfer reaches
+	// the memory controller. The hardware charges about 40 cycles for this
+	// whatever the transfer's size, and without it an 8-byte mram_read comes
+	// out 20% faster than the machine. runner/tests/perf/mram_kernel.c measures
+	// it.
+	startup := command_line_parser.IntParameter("dma_startup_cycles")
+
 	this.input_q = new(dram.DmaCommandQ)
-	this.input_q.Init(max_num_tasklets, 0)
+	this.input_q.Init(max_num_tasklets, startup)
 
 	this.ready_q = new(dram.DmaCommandQ)
 	this.ready_q.Init(max_num_tasklets, 0)
@@ -202,6 +209,14 @@ func (this *Dma) Pop() *dram.DmaCommand {
 func (this *Dma) Cycle() {
 	this.ServiceInputQ()
 	this.ServiceReadyQ()
+
+	// Without these the queues' timers never count down. It went unnoticed
+	// while both were zero, and any non-zero startup stalled the DPU forever.
+	// CycleAll, not Cycle: the engine's startup is a latency that several
+	// tasklets' transfers serve at the same time, not an interval between
+	// them.
+	this.input_q.CycleAll()
+	this.ready_q.CycleAll()
 }
 
 func (this *Dma) ServiceInputQ() {

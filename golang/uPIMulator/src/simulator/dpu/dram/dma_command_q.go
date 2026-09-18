@@ -123,3 +123,15 @@ func (this *DmaCommandQ) Cycle() {
 		this.cycles[0] -= 1
 	}
 }
+
+// CycleAll counts every entry's timer down, not only the one at the front.
+// That is the difference between a queue whose timer is an issue interval and
+// one whose timer is a latency each entry serves concurrently. The DMA engine
+// is the latter: several tasklets' transfers are in flight at once, and
+// counting only the front down makes the engine's startup serialise across
+// them, which costs 5% at 16 tasklets and nothing at one.
+func (this *DmaCommandQ) CycleAll() {
+	for i := range this.cycles {
+		this.cycles[i] -= 1
+	}
+}

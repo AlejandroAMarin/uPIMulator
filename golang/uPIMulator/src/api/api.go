@@ -54,6 +54,12 @@ type Config struct {
 	TCl  int
 	TBl  int
 
+	// Logic cycles a DMA waits before its first byte reaches the memory
+	// controller: the DMA engine's own startup, which the DRAM timings above
+	// do not describe. Measured at about 40 cycles on this machine, the same
+	// whatever the transfer's size.
+	DmaStartupCycles int
+
 	ReadBandwidth  int
 	WriteBandwidth int
 
@@ -108,8 +114,13 @@ func DefaultConfig() Config {
 		TRcd: 32,
 		TRas: 78,
 		TRp:  32,
-		TCl:  32,
-		TBl:  8,
+		// 22, not the 32 upstream assumed. MRAM has no datasheet to read this
+		// off, and 32 made a 2 KB mram_read 23% slower than the machine.
+		// Measured by runner/tests/perf/mram_kernel.c.
+		TCl: 22,
+		TBl: 8,
+
+		DmaStartupCycles: 42,
 
 		ReadBandwidth:  1,
 		WriteBandwidth: 3,
@@ -561,6 +572,7 @@ func (this Config) toCommandLineParser() *misc.CommandLineParser {
 	add_int("t_rp", this.TRp)
 	add_int("t_cl", this.TCl)
 	add_int("t_bl", this.TBl)
+	add_int("dma_startup_cycles", this.DmaStartupCycles)
 	add_int("read_bandwidth", this.ReadBandwidth)
 	add_int("write_bandwidth", this.WriteBandwidth)
 

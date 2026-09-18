@@ -92,7 +92,7 @@ func (this *Dpu) Init(
 	this.memory_controller.ConnectMram(this.mram)
 
 	this.dma = new(logic.Dma)
-	this.dma.Init()
+	this.dma.Init(command_line_parser)
 	this.dma.ConnectAtomic(this.atomic)
 	this.dma.ConnectIram(this.iram)
 	this.dma.ConnectOperandCollector(this.operand_collector)

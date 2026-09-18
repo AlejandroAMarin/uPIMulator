@@ -104,6 +104,14 @@ func upim_set_create(program_dir *C.char, num_dpus C.int, num_tasklets C.int) C.
 	envMbps("UPIM_TRANSFER_SETUP_NS", &config.TransferSetupNs)
 	envMbps("UPIM_TRANSFER_FIRST_NS", &config.TransferFirstNs)
 
+	// Memory timing, so the MRAM model can be refitted without rebuilding.
+	envMbps("UPIM_DMA_STARTUP_CYCLES", &config.DmaStartupCycles)
+	envMbps("UPIM_T_CL", &config.TCl)
+	envMbps("UPIM_T_BL", &config.TBl)
+	envMbps("UPIM_T_RCD", &config.TRcd)
+	envMbps("UPIM_T_RAS", &config.TRas)
+	envMbps("UPIM_T_RP", &config.TRp)
+
 	// One rank of the requested width. The simulator places no limit on how
 	// many DPUs a rank may hold.
 	config.NumChannels = 1
