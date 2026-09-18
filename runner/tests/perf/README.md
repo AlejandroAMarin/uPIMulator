@@ -65,59 +65,111 @@ on both, which is the smaller total input, not the DPU count.
 
 **This does not test the channel model.** See below.
 
-## The channel model is not on the runner's path
+## Host transfers
 
-`api.CopyTo` and `api.CopyFrom` write and read DPU memory directly.
-`Host.Schedule`/`Host.Check`, which are what build channel messages, are called
-only from `Simulator.Init` -- the standalone `--benchmark` path. `api.New` calls
-`Simulator.Build` and `Host.Load`, and `api.Launch` calls `Host.Launch`; none of
-them touches a channel.
+Transfers used to cost nothing. `api.CopyTo` and `api.CopyFrom` wrote DPU
+memory directly, and `Host.Schedule`/`Host.Check` -- which build channel
+messages -- were reached only from `Simulator.Init`, the standalone
+`--benchmark` path. A host-to-DPU transfer under the runner advanced the
+simulator by zero cycles, so no timing result depended on it.
 
-So a host-to-DPU transfer under the runner costs **zero simulated cycles**.
-Confirmed by transferring 4 MB to each of 4 DPUs and back through the runner:
-the simulator advanced no cycles at all. Adding DPUs therefore cannot test the
-channel, and no timing result the runner produces depends on it.
+They are charged now. The shim calls `upim_charge_transfer` once per
+`dpu_push_xfer` or `dpu_copy_*`, not once per DPU: the DPUs of a rank move
+their data together, and charging each in turn would report a whole rank as
+slow as one DPU repeated. The cost lands in a set-wide `transfer_cycle`
+counter that `UPIM_STATS` prints, kept apart from the DPU counters because a
+transfer covers several DPUs and no DPU counter sees it. Transfers and kernels
+never overlap here, so the two simply add.
 
-### What the model would predict if it were on that path
+### The model
 
-Measured on this machine's hardware with `xfer_host.c`, 4 MB per DPU, best of
-three:
+    cycles = setup + max( bytes / dpu_rate , bytes * dpus / rank_rate )
 
-| DPUs | write, hardware | read, hardware |
+A transfer pays a fixed setup and then moves its bytes, limited both by the one
+DPU's link and by the rank interface every DPU on it shares. Writing to 8 DPUs
+therefore costs the same as writing to one, because the rank interface is
+nowhere near saturated; writing to a full rank is limited by the interface
+instead. The first transfer a set makes pays an extra 250 us to bring the rank
+up.
+
+| parameter | value | what it is |
 |---|---|---|
-| 1 | 0.954 GB/s | 0.232 GB/s |
-| 4 | 1.763 GB/s | 0.866 GB/s |
-| 16 | 5.006 GB/s | 2.617 GB/s |
-| 64 | 4.608 GB/s | 2.562 GB/s |
+| `DpuWriteMbps` | 966 | one DPU's write link |
+| `DpuReadMbps` | 250 | one DPU's read link |
+| `RankWriteMbps` | 9700 | the rank interface, writing |
+| `RankReadMbps` | 3400 | the rank interface, reading |
+| `TransferSetupNs` | 30000 | before a byte moves |
+| `TransferFirstNs` | 250000 | extra, first transfer only |
 
-The model, derived from the code rather than measured: `Host` groups a rank's
-DPUs into 8 classes by `dpu_id % 8` and issues one channel message per class,
-each charged one DPU's chunk size. `Channel.ServiceInputQ` takes
-`size / bandwidth` cycles per message at the logic clock, and the messages are
-serialised. With `read_bandwidth` 1 and `write_bandwidth` 3 bytes per cycle at
-350 MHz, N DPUs of S bytes each cost `min(N,8) * S / bandwidth` cycles, so the
-aggregate is `(N / min(N,8)) * bandwidth * 350 MHz`:
+All seven are settable from the environment -- `UPIM_DPU_WRITE_MBPS`,
+`UPIM_TRANSFER_SETUP_NS` and so on -- so a study can vary the link without
+rebuilding. Setting a rate to zero makes transfers free again.
 
-| DPUs | write, model | vs hardware | read, model | vs hardware |
-|---|---|---|---|---|
-| 1 | 1.05 GB/s | 1.10x | 0.35 GB/s | 1.51x |
-| 4 | 1.05 GB/s | 0.60x | 0.35 GB/s | 0.40x |
-| 16 | 2.10 GB/s | 0.42x | 0.70 GB/s | 0.27x |
-| 64 | 8.40 GB/s | 1.82x | 2.80 GB/s | 1.09x |
+### Where the numbers come from
 
-The constants are close at one DPU, where they were presumably fitted. The
-shape is wrong: the model is flat to 8 DPUs and then linear, because it assumes
-exactly 8-way interleaving and nothing else, whereas the hardware rises
-smoothly and saturates near 16 DPUs at about 4.8 GB/s writing and 2.6 GB/s
-reading. In between it is 2 to 2.5 times pessimistic, and at a full rank it is
-1.8 times optimistic for writes.
+`xfer_host.c` sweeps the DPU count and the transfer size in both directions on
+real hardware and reports the **median** of many repetitions, not the best. The
+best is what the link can do on a warm path; the median is what a program
+actually waits for, and that is what a simulator should predict. Calibrating on
+the best gave a setup of 23 us and under-predicted BIMSA's transfer time by
+half.
 
-Putting transfers on the channel model is a change to the runner's design, not
-a fix: it would cost simulation speed and change every M4 number. Worth doing
-before any study whose conclusion depends on transfer time; not worth doing for
-kernel-time studies, which is what M4 measures.
+The first repetition of all is discarded and reported separately. It costs
+250 us against a median of 30 -- the rank is being brought up -- and folding it
+into an average would corrupt every point. It is modelled explicitly instead,
+because a short run is dominated by it: it is 40% of everything BIMSA spends
+moving data.
 
-## Method
+    XPROFILE=backend=hw UPMEM_PROFILE=backend=hw runner/tests/perf/xfer_host > sweep.tsv
+
+### How close it is
+
+Over the 98 measured points, the median error is 11% and the mean 15%. Below
+256 KB per DPU, which is the range a real kernel transfers in, the median is
+11% and the worst 41%.
+
+| bytes/DPU | DPUs | dir | hardware us | model us | error |
+|---|---|---|---|---|---|
+| 512 | 1 | write | 29 | 31 | +7% |
+| 512 | 1 | read | 33 | 32 | -2% |
+| 512 | 64 | write | 42 | 33 | -21% |
+| 512 | 64 | read | 67 | 40 | -41% |
+| 32768 | 1 | write | 56 | 64 | +15% |
+| 32768 | 1 | read | 163 | 161 | -1% |
+| 32768 | 64 | write | 178 | 246 | +38% |
+| 32768 | 64 | read | 638 | 647 | +1% |
+| 262144 | 1 | write | 303 | 301 | -1% |
+| 262144 | 1 | read | 1104 | 1079 | -2% |
+| 262144 | 64 | write | 2695 | 1760 | -35% |
+| 262144 | 64 | read | 6294 | 4964 | -21% |
+
+End to end on the workload that matters, BIMSA at 16 pairs on one DPU, eleven
+transfers totalling 15 KB:
+
+| | hardware | uPIMulator | error |
+|---|---|---|---|
+| transfers | 0.646 ms | 0.620 ms | -4.0% |
+
+### Where the shape is wrong
+
+Two places, both measured rather than suspected.
+
+The real machine's cost per DPU grows with the chunk size somewhere between 512
+bytes and 4 KB, rather than switching from a fixed setup to a fixed rate. That
+is why 512 bytes to 64 DPUs is under-predicted.
+
+A scatter of large buffers to many DPUs falls below what the link can do,
+because the host has to gather them: 256 KB to each of 64 DPUs measures 2695 us
+against a link capability nearer 1760. That is host memory bandwidth, not the
+machine, and it gets worse the larger the buffers. A study transferring
+multi-megabyte chunks to a full rank should measure its own case and set
+`UPIM_RANK_WRITE_MBPS` accordingly.
+
+Neither is a two-limit shape, and no setting of these parameters reproduces
+them. They are documented rather than fitted, because a curve fitted to this
+machine would be worse than useless for M5, which exists to change the machine.
+
+## Method## Method
 
 Both sides run the same kernel source with the same macros. `build_bimsa.sh`
 takes the command `make -n` would use for the hardware and rewrites it for the
@@ -177,9 +229,11 @@ iteration plus one quantum of overhead. 22 is 2 x 11, the issue interval.
 - One workload. BIMSA at 16 short pairs is not a claim about every kernel, and
   the error is known to move with the input: the same comparison at a single
   pair gives -6.2% rather than -4.9%.
-- The channel, rank and host-transfer models are still untested end to end,
-  because the runner does not use them. The DPU sweep above shows only that
-  adding DPUs does not perturb kernel time.
+- The rank and channel topology is still untested: the runner puts every DPU on
+  one rank of one channel, so nothing here exercises more than one of either.
+- Transfers are charged analytically, not simulated as traffic. That is exact
+  while transfers and kernels do not overlap, which is the case here. A study
+  using asynchronous transfers would need them modelled as events instead.
 - `PERF_TIER=3` measures the kernel as a whole. Which part of it the model gets
   wrong is a tier-1 or tier-2 question, not answered here.
 - At 16 tasklets each tasklet's probe window covers about half the launch, on

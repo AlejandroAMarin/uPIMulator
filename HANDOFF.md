@@ -21,7 +21,7 @@ operation served by simulation. That part works. BIMSA first, GIMSA next.
 | M1 simulator as a library | **Done** |
 | M2 memory and speed | **Done** (147 MB -> 2.5 MB per DPU; 2.26x faster) |
 | M3 libdpu shim | **Done**, BIMSA runs end to end |
-| M4 validation study | **Kernel time validated.** Instruction counts match hardware exactly; cycle counts are inside ±5.5% over 1-16 tasklets and 1-16 DPUs. The channel model is untested and unused -- see below |
+| M4 validation study | **Kernel and transfer time validated.** Instructions match hardware exactly, kernel cycles inside ±5.5% over 1-16 tasklets and 1-16 DPUs, transfer time inside 4% on BIMSA |
 | M5 architecture exploration | Not started |
 
 ## The former blocker: eleven functional bugs, all fixed
@@ -133,24 +133,40 @@ gates every point on `CPU recovery for 0 pairs (0.00%)` and `Results are equal`.
 - **Do not compare `PERF_S_TOTAL` against `num_instructions`.** The probe covers
   the kernel; `num_instructions` covers the whole launch, 3% more.
 
-### The channel model is unused, not merely untested
+### Host transfers are charged now
 
-`api.CopyTo` and `api.CopyFrom` write DPU memory directly. `Host.Schedule` and
-`Host.Check`, which build channel messages, are reached only from
-`Simulator.Init`, the standalone `--benchmark` path. A host-to-DPU transfer
-under the runner therefore costs **zero simulated cycles** -- confirmed by
-moving 4 MB to each of 4 DPUs and back, with the simulator advancing no cycles.
+They used to be free: `api.CopyTo` wrote DPU memory directly and the channel
+model was reachable only from the standalone `--benchmark` path, so a transfer
+advanced the simulator by zero cycles. The shim now calls
+`upim_charge_transfer` once per `dpu_push_xfer` or `dpu_copy_*` -- once per
+batch, not per DPU, because the DPUs of a rank move together -- and the cost
+lands in a set-wide `transfer_cycle` that `UPIM_STATS` prints.
 
-Sweeping DPUs cannot test it, and no M4 number depends on it. Measured against
-hardware, the model's constants are close at one DPU and wrong in shape
-elsewhere: it assumes exactly 8-way interleaving, so its aggregate bandwidth is
-flat to 8 DPUs and then linear, while a real rank rises smoothly and saturates
-near 16 DPUs. In between it is 2 to 2.5 times pessimistic. Numbers in
-`runner/tests/perf/README.md`.
+    cycles = setup + max( bytes / dpu_rate , bytes * dpus / rank_rate )
 
-Putting transfers on the channel model is a design change to the runner, not a
-fix. It costs simulation speed and moves every M4 number. Do it before a study
-whose conclusion depends on transfer time; skip it for kernel-time studies.
+Calibrated against this machine: 966 MB/s to one DPU, 250 MB/s from it, 9700
+and 3400 MB/s for the rank interface, 30 us of setup, and 250 us more on a
+set's first transfer to bring the rank up. All seven are settable from the
+environment (`UPIM_DPU_WRITE_MBPS`, `UPIM_TRANSFER_SETUP_NS`, ...) so M5 can
+vary the link without rebuilding.
+
+On BIMSA the transfers now measure 0.620 ms against the hardware's 0.646 ms,
+**-4.0%**. Median error over the 98 measured points of the calibration sweep is
+11%.
+
+Two things to know before trusting a transfer number:
+
+- **Calibrate on the median, not the best.** The first fit used best-of-300 and
+  under-predicted BIMSA by half. The best is the warm path; a program waits for
+  the median.
+- **The first transfer costs 250 us**, eight times an ordinary one, and it is
+  40% of everything BIMSA spends moving data. It is modelled explicitly.
+
+Where the shape is wrong, both measured: the real per-DPU cost grows with chunk
+size between 512 bytes and 4 KB rather than switching cleanly from setup to
+rate, and a scatter of large buffers to many DPUs falls below the link because
+the host has to gather them. `runner/tests/perf/README.md` has both, with the
+residual at every point.
 
 ### What is left
 
@@ -158,10 +174,11 @@ whose conclusion depends on transfer time; skip it for kernel-time studies.
    comparison at a single pair gives -6.2% rather than -4.9%.
 2. `PERF_TIER=1` or `2` to find which part of the kernel the model gets wrong.
    Tier 3 only says the total is 5% out.
-3. Route the runner's transfers through the channel model, if and only if a
-   study needs transfer time. Recalibrate its bandwidths against
-   `runner/tests/perf/xfer_host.c` if so.
-4. GIMSA.
+3. More than one rank or channel. The runner puts every DPU on one of each, so
+   that topology is still untested.
+4. Transfers as simulated traffic rather than an analytic charge. Only needed
+   for a study where transfers overlap a kernel; they do not here.
+5. GIMSA.
 
 ## Safety: never touch the hardware from a simulated run
 
@@ -208,8 +225,9 @@ the only commands allowed to ask for `backend=hw`, and they must be deliberate.
     uPIMulator/runner/tests/perf/sweep.sh <input.seq> <seq-size> cycles 1 2 4 8 16
     uPIMulator/runner/tests/perf/sweep_dpus.sh <pair.seq> <seq-size> 4 4 cycles 1 2 4 8 16
 
-    # real host-DPU bandwidth, to calibrate the channel model against
-    XDPUS=16 XBYTES_MB=4 UPMEM_PROFILE=backend=hw /tmp/xfer_host
+    # recalibrate the transfer model against hardware (medians, cold start apart)
+    XPROFILE=backend=hw UPMEM_PROFILE=backend=hw \
+        uPIMulator/runner/tests/perf/xfer_host > sweep.tsv
 
     # build BIMSA's kernel for uPIMulator from make's own command
     uPIMulator/runner/tests/perf/build_bimsa.sh <out> NR_TASKLETS=N PERF=1 ...

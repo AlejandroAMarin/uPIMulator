@@ -230,6 +230,16 @@ static void report_stats(struct shim_set *set)
             upim_stat(set->handle, (int)i, (char *)"memory_cycle", 0));
     }
 
+    /* Host transfers belong to the set, not to any DPU: one transfer covers
+     * several at once and no DPU counter sees it. They do not overlap a kernel
+     * here, so the two simply add up. */
+    fprintf(out, "\ntransfer_cycle\ttransfer_to_bytes\ttransfer_from_bytes\ttransfer_count\n");
+    fprintf(out, "%lld\t%lld\t%lld\t%lld\n",
+        upim_transfer_stat(set->handle, (char *)"transfer_cycle"),
+        upim_transfer_stat(set->handle, (char *)"transfer_to_bytes"),
+        upim_transfer_stat(set->handle, (char *)"transfer_from_bytes"),
+        upim_transfer_stat(set->handle, (char *)"transfer_count"));
+
     if (out != stderr) {
         fclose(out);
     }
@@ -433,10 +443,22 @@ dpu_error_t dpu_copy_to(
             }
         }
 
+        /* One charge for the batch: the DPUs of a rank transfer together, and
+         * charging each in turn would serialise what the hardware overlaps. */
+        upim_charge_transfer(set->handle, (int)set->nr_dpus, (long long)length, 1);
         return DPU_OK;
     }
 
-    return copy_one(set, (uint32_t)index, symbol_name, symbol_offset, (void *)src, length, 1);
+    {
+        dpu_error_t status
+            = copy_one(set, (uint32_t)index, symbol_name, symbol_offset, (void *)src, length, 1);
+
+        if (status == DPU_OK) {
+            upim_charge_transfer(set->handle, 1, (long long)length, 1);
+        }
+
+        return status;
+    }
 }
 
 dpu_error_t dpu_copy_from(
@@ -454,7 +476,16 @@ dpu_error_t dpu_copy_from(
 
     /* Reading a whole set into one buffer is ambiguous, so take DPU 0, which is
      * what the hardware library does for a single-buffer read. */
-    return copy_one(set, index < 0 ? 0 : (uint32_t)index, symbol_name, symbol_offset, dst, length, 0);
+    {
+        dpu_error_t status = copy_one(
+            set, index < 0 ? 0 : (uint32_t)index, symbol_name, symbol_offset, dst, length, 0);
+
+        if (status == DPU_OK) {
+            upim_charge_transfer(set->handle, 1, (long long)length, 0);
+        }
+
+        return status;
+    }
 }
 
 dpu_error_t dpu_prepare_xfer(struct dpu_set_t dpu_set, void *buffer)
@@ -499,6 +530,8 @@ dpu_error_t dpu_push_xfer(struct dpu_set_t dpu_set,
     trace("dpu_push_xfer: %s %s+%u, %zu bytes",
         xfer == DPU_XFER_TO_DPU ? "to" : "from", symbol_name, symbol_offset, length);
 
+    uint32_t staged = 0;
+
     for (uint32_t i = 0; i < set->nr_dpus; i++) {
         if (set->xfer[i] == NULL) {
             continue;
@@ -510,7 +543,14 @@ dpu_error_t dpu_push_xfer(struct dpu_set_t dpu_set,
         if (status != DPU_OK) {
             return status;
         }
+
+        staged++;
     }
+
+    /* One charge for the whole push. This is the bulk path, and the DPUs of a
+     * rank move their data at the same time; charging per DPU would report a
+     * rank as slow as a single DPU repeated. */
+    upim_charge_transfer(set->handle, (int)staged, (long long)length, xfer == DPU_XFER_TO_DPU);
 
     /* When tracing a read, report how much of it was non-zero. An all-zero
      * result usually means the kernel wrote somewhere else, which is otherwise

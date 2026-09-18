@@ -94,6 +94,16 @@ func upim_set_create(program_dir *C.char, num_dpus C.int, num_tasklets C.int) C.
 		config.Verbose = level
 	}
 
+	// Transfer rates in MB/s, so a study can vary the link without rebuilding.
+	// Setting one to zero makes transfers free, which is what the runner did
+	// before it charged for them at all.
+	envMbps("UPIM_DPU_WRITE_MBPS", &config.DpuWriteMbps)
+	envMbps("UPIM_DPU_READ_MBPS", &config.DpuReadMbps)
+	envMbps("UPIM_RANK_WRITE_MBPS", &config.RankWriteMbps)
+	envMbps("UPIM_RANK_READ_MBPS", &config.RankReadMbps)
+	envMbps("UPIM_TRANSFER_SETUP_NS", &config.TransferSetupNs)
+	envMbps("UPIM_TRANSFER_FIRST_NS", &config.TransferFirstNs)
+
 	// One rank of the requested width. The simulator places no limit on how
 	// many DPUs a rank may hold.
 	config.NumChannels = 1
@@ -114,6 +124,14 @@ func upim_set_create(program_dir *C.char, num_dpus C.int, num_tasklets C.int) C.
 	registry[handle] = set
 
 	return C.int(handle)
+}
+
+// envMbps overrides a transfer rate from the environment, leaving it alone when
+// the variable is unset or not a number.
+func envMbps(name string, into *int) {
+	if value, err := strconv.Atoi(os.Getenv(name)); err == nil && value >= 0 {
+		*into = value
+	}
 }
 
 func loadProgram(program_dir string) (program *host.Program, err error) {
@@ -281,6 +299,49 @@ func upim_run(handle C.int, max_cycles C.longlong) C.int {
 	}
 
 	return 0
+}
+
+// upim_charge_transfer records the cost of a host transfer that has already
+// moved its data: num_dpus DPUs of bytes_per_dpu each, to the DPUs when to_dpu
+// is non-zero. The shim calls it once per dpu_push_xfer or dpu_copy_*, not once
+// per DPU, because the DPUs of a rank transfer together and charging each
+// separately would serialise what the hardware overlaps.
+//
+//export upim_charge_transfer
+func upim_charge_transfer(handle C.int, num_dpus C.int, bytes_per_dpu C.longlong, to_dpu C.int) C.int {
+	set, found := lookup(handle)
+
+	if !found {
+		return setError("no such set: %d", int(handle))
+	}
+
+	set.ChargeTransfer(int(num_dpus), int64(bytes_per_dpu), to_dpu != 0)
+
+	return 0
+}
+
+// upim_transfer_stat reads one of the set-wide transfer counters:
+// transfer_cycle, transfer_to_bytes, transfer_from_bytes or transfer_count.
+// These belong to the set rather than to a DPU, because a transfer covers
+// several DPUs at once and no DPU counter sees it.
+//
+//export upim_transfer_stat
+func upim_transfer_stat(handle C.int, name *C.char) C.longlong {
+	set, found := lookup(handle)
+
+	if !found {
+		setError("no such set: %d", int(handle))
+		return -1
+	}
+
+	wanted := C.GoString(name)
+
+	if value, ok := set.TransferStats()[wanted]; ok {
+		return C.longlong(value)
+	}
+
+	setError("no transfer counter named %q", wanted)
+	return -1
 }
 
 // upim_stat reads one counter for one DPU. When per_launch is non-zero the

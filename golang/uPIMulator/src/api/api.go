@@ -57,6 +57,29 @@ type Config struct {
 	ReadBandwidth  int
 	WriteBandwidth int
 
+	// Host-to-DPU transfer rates, in MB/s. A transfer is limited both by the
+	// link to one DPU and by the rank interface every DPU on it shares, so the
+	// cost is whichever of the two takes longer. Measured on this machine's
+	// v1A hardware by runner/tests/perf/xfer_host.c; see that directory's
+	// README for what they are and how far the model is from the machine.
+	DpuWriteMbps  int
+	DpuReadMbps   int
+	RankWriteMbps int
+	RankReadMbps  int
+
+	// What a transfer costs before a single byte moves, in nanoseconds. This
+	// is the whole cost of anything small: on this machine an 8-byte transfer
+	// and a 512-byte one both take about 30 us. A model without it reports a
+	// kernel that makes many small transfers -- BIMSA makes eleven -- as an
+	// order of magnitude faster than it is.
+	TransferSetupNs int
+
+	// Extra nanoseconds for the first transfer a set makes, which pays to
+	// bring the rank up. It is 250 us here, eight times an ordinary transfer,
+	// and a short run is dominated by it: it is 40% of everything BIMSA spends
+	// moving data.
+	TransferFirstNs int
+
 	// BinDirpath is only used by Dump. Leave it empty if you do not call Dump.
 	BinDirpath string
 }
@@ -90,6 +113,22 @@ func DefaultConfig() Config {
 
 		ReadBandwidth:  1,
 		WriteBandwidth: 3,
+
+		// Measured on this machine's v1A hardware, fitted to the median of many
+		// repetitions rather than the best: the best is what the link can do on
+		// a warm path, the median is what a program actually waits for. The
+		// per-DPU rates are what a single DPU sustains. The rank rates are a
+		// compromise, because the real machine's aggregate keeps creeping up
+		// between 16 and 64 DPUs instead of flattening and no two-limit model
+		// reproduces that. runner/tests/perf/README.md has the sweep and the
+		// residual at every point.
+		DpuWriteMbps:  966,
+		DpuReadMbps:   250,
+		RankWriteMbps: 9700,
+		RankReadMbps:  3400,
+
+		TransferSetupNs: 30000,
+		TransferFirstNs: 250000,
 	}
 }
 
@@ -103,6 +142,14 @@ type Set struct {
 
 	launched bool
 	baseline []map[string]int64
+
+	// What the host spent moving data, which no DPU counter sees. Transfers
+	// and kernels never overlap here, so these simply add to the kernel time.
+	config              Config
+	transfer_cycles     int64
+	transfer_to_bytes   int64
+	transfer_from_bytes int64
+	transfer_count      int64
 }
 
 // New builds a set and installs program on every DPU. The DPUs are idle
@@ -130,6 +177,7 @@ func New(config Config, program *host.Program) (set *Set, err error) {
 		dpus:      sim.Host().Dpus(),
 		addresses: sim.Host().Addresses(),
 		values:    sim.Host().Values(),
+		config:    config,
 	}
 	set.baseline = make([]map[string]int64, len(set.dpus))
 
@@ -166,6 +214,93 @@ func (this *Set) writeClocksPerSec(logic_frequency_mhz int) error {
 	}
 
 	return nil
+}
+
+// TransferCycles returns what a host transfer of bytes_per_dpu to or from each
+// of num_dpus DPUs costs, in DPU clock cycles.
+//
+// A transfer costs a fixed setup plus the time to move the bytes. Two limits
+// apply to the moving and the slower one wins: one DPU's link carries
+// DpuWriteMbps or DpuReadMbps whatever else is going on, and every DPU on a
+// rank shares an interface carrying RankWriteMbps or RankReadMbps. Writing to
+// 8 DPUs at once therefore costs the same as writing to one, because the rank
+// interface is nowhere near saturated; writing to a full rank is limited by
+// the interface instead.
+//
+// The setup is not a rounding error. Below about 32 KB it is the whole cost,
+// and a kernel that makes many small transfers -- BIMSA makes eleven -- is
+// dominated by it.
+//
+// The shape is deliberately simple, and it is wrong in two known places: the
+// real machine's cost per DPU grows with the chunk size somewhere between 512
+// bytes and 4 KB rather than at a fixed rate, and a scatter of multi-megabyte
+// buffers to a whole rank falls below the link's capability because the host
+// has to gather them. runner/tests/perf/README.md measures both.
+//
+// Both numbers are measured, not assumed: see runner/tests/perf/README.md for
+// the sweep they come from and for how far this two-limit shape is from the
+// machine in between the two regimes.
+func (this *Set) TransferCycles(num_dpus int, bytes_per_dpu int64, to_dpu bool) int64 {
+	if num_dpus <= 0 || bytes_per_dpu <= 0 {
+		return 0
+	}
+
+	dpu_mbps := int64(this.config.DpuReadMbps)
+	rank_mbps := int64(this.config.RankReadMbps)
+
+	if to_dpu {
+		dpu_mbps = int64(this.config.DpuWriteMbps)
+		rank_mbps = int64(this.config.RankWriteMbps)
+	}
+
+	if dpu_mbps <= 0 || rank_mbps <= 0 {
+		return 0
+	}
+
+	// cycles = bytes / (MB/s) * (cycles/s), and the megahertz cancels the
+	// megabytes, so this stays in integers without overflowing for any
+	// transfer a DPU could hold.
+	mhz := int64(this.config.LogicFrequency)
+
+	per_dpu := bytes_per_dpu * mhz / dpu_mbps
+	whole_rank := bytes_per_dpu * int64(num_dpus) * mhz / rank_mbps
+
+	moving := per_dpu
+	if whole_rank > moving {
+		moving = whole_rank
+	}
+
+	setup := int64(this.config.TransferSetupNs)
+
+	if this.transfer_count == 0 {
+		setup += int64(this.config.TransferFirstNs)
+	}
+
+	return setup*mhz/1000 + moving
+}
+
+// ChargeTransfer records a host transfer's cost. The data itself has already
+// moved; this is the time it would have taken.
+func (this *Set) ChargeTransfer(num_dpus int, bytes_per_dpu int64, to_dpu bool) {
+	this.transfer_cycles += this.TransferCycles(num_dpus, bytes_per_dpu, to_dpu)
+	this.transfer_count++
+
+	if to_dpu {
+		this.transfer_to_bytes += bytes_per_dpu * int64(num_dpus)
+	} else {
+		this.transfer_from_bytes += bytes_per_dpu * int64(num_dpus)
+	}
+}
+
+// TransferStats reports what the host transfers cost, for a caller that wants
+// the whole picture rather than only what happened inside a DPU.
+func (this *Set) TransferStats() map[string]int64 {
+	return map[string]int64{
+		"transfer_cycle":      this.transfer_cycles,
+		"transfer_to_bytes":   this.transfer_to_bytes,
+		"transfer_from_bytes": this.transfer_from_bytes,
+		"transfer_count":      this.transfer_count,
+	}
 }
 
 // NumDpus returns how many DPUs the set holds.
