@@ -21,7 +21,7 @@ operation served by simulation. That part works. BIMSA first, GIMSA next.
 | M1 simulator as a library | **Done** |
 | M2 memory and speed | **Done** (147 MB -> 2.5 MB per DPU; 2.26x faster) |
 | M3 libdpu shim | **Done**, BIMSA runs end to end |
-| M4 validation study | **Validated and tightened.** Instructions match hardware exactly; kernel cycles inside 2.2% over 1-16 tasklets, with no trend left in the error; transfers inside 4% |
+| M4 validation study | **Validated on three workloads.** Instructions match hardware exactly; kernel cycles inside 2.2% over 1-16 tasklets on BIMSA and PrIM's vector addition, and inside 0.15% on PrIM's histogram; transfers inside 4% |
 | M5 architecture exploration | Not started |
 
 ## The former blocker: eleven functional bugs, all fixed
@@ -256,12 +256,41 @@ rate, and a scatter of large buffers to many DPUs falls below the link because
 the host has to gather them. `runner/tests/perf/README.md` has both, with the
 residual at every point.
 
+### Three workloads, and what they say together
+
+`runner/tests/prim/run.sh` adds two of PrIM's own kernels, taken unchanged
+except for a counter probe. They are chosen to be unlike BIMSA and unlike each
+other, and the result localises the one error that is left.
+
+| workload | transfers per 1 KB of work | error over 1-16 tasklets |
+|---|---|---|
+| `hst`, shared histogram | one read | -0.03% to -0.13% |
+| BIMSA, wavefront | short scattered reads and writes | +1.21% to +2.16% |
+| `va`, vector addition | two reads and one write | +0.33% to +2.19% |
+
+**The residual tracks how much of the time goes on moving data**, which is what
+a per-byte memory rate 1.6% above the machine's predicts. A kernel that barely
+touches MRAM is right to a tenth of a percent. Nothing else in the model is off
+by enough to see.
+
+Instruction counts are exact at one tasklet on both new kernels.
+
+Two harness rules came out of this, and both cost real time before they were
+understood:
+
+- **Close a probe's window with a barrier.** The counter is one register the
+  whole DPU shares, so if tasklet 0 stops reading when it finishes its own
+  share, the count depends on the order the tasklets finish in. `va` showed
+  instruction counts 2.4% apart and cycle errors of 4.7% for that reason alone.
+- **Take the median of several hardware runs.** These kernels are short by
+  BIMSA's standard and the hardware repeats to only about 1%. One reading made
+  `va` at 2 tasklets look 1.78% out when the median says 0.33%.
+
 ### What is left
 
-1. **More workloads and input sizes.** This is now the first thing to do. One
-   program tuned to about 2% is not a validated simulator, and the two
-   corrections that removed the tasklet trend were only found because a probe
-   existed for each mechanism. Write the probe first, then the workload.
+1. More workloads still. Three is better than one, but `hst` and `va` are both
+   block-streaming kernels over one DPU; a kernel with an irregular access
+   pattern, or one that spans ranks, would test something these do not.
 2. More than one rank or channel. The runner puts every DPU on one of each, so
    that topology is still untested.
 3. The flat +1.6% left in MRAM throughput. `t_cl` counts whole memory cycles
@@ -319,6 +348,9 @@ the only commands allowed to ask for `backend=hw`, and they must be deliberate.
 
     # ALU / condition-code / DMA conformance against UPMEM's own simulator
     uPIMulator/runner/tests/alu/run.sh
+
+    # PrIM kernels on hardware vs the simulator (asks for backend=hw)
+    uPIMulator/runner/tests/prim/run.sh
 
     # MRAM latency at one tasklet, hardware vs the simulator
     uPIMulator/runner/tests/perf/mram_sweep.sh

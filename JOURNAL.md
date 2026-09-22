@@ -223,6 +223,47 @@ the working tree, and a trap was written down — building the simulator does no
 build the runner's library, and an hour was spent measuring replaced code
 because of it.
 
+## 2026-09-22 — Two more workloads
+
+The first check that the model holds beyond the program it was fitted to.
+Two of PrIM's own kernels, taken unchanged except for a counter probe, chosen
+to be unlike BIMSA and unlike each other:
+
+- **Vector addition.** Two long reads and one write per block, almost no
+  arithmetic between them.
+- **Shared histogram.** One read per block, then a few hundred data-indexed
+  updates to a private table in fast memory, then a reduction across tasklets.
+
+Errors against the hardware, over 1 to 16 tasklets:
+
+| workload | error |
+|---|---|
+| histogram | -0.03% to -0.13% |
+| BIMSA | +1.21% to +2.16% |
+| vector addition | +0.33% to +2.19% |
+
+Instruction counts are exact at one tasklet on both new kernels.
+
+**The result lines up with how much of each kernel's time goes on moving data**,
+which is the one error the model is known to still have. A kernel that barely
+touches main memory is right to a tenth of a percent; one that does little else
+carries the whole of it. Nothing else in the model is out by enough to see.
+
+Sweeping the input size instead shows the same thing from another side: vector
+addition improves from +3.1% to +0.7% as the input grows, because its error at
+the small end is the fixed cost of starting a kernel rather than the kernel.
+
+Two measurement rules came out of this, and both would have produced wrong
+answers quietly:
+
+- **A shared counter needs a barrier before it is read.** Without one the first
+  tasklet stops counting when it finishes its own share, and what it reports
+  depends on the order the others finish in. That alone showed instruction
+  counts 2.4% apart and cycle errors of 4.7% that were not real.
+- **Short runs need the median of several.** These kernels take a fiftieth of
+  BIMSA's time and the hardware repeats to only about 1%. A single reading made
+  one point look 1.8% out where the median says 0.3%.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.
@@ -246,14 +287,16 @@ number above is a real difference and not noise.
 | `runner/tests/alu` | 1176 arithmetic and condition results, against UPMEM's own simulator |
 | `runner/tests/fp` | The double-precision case that started all of it |
 | `runner/tests/perf` | The hardware-against-simulator measurements and the fits behind them: whole-program, memory latency, memory under contention, register banks, host transfers |
+| `runner/tests/prim` | Two of PrIM's own kernels against the hardware, as a check that the model holds beyond BIMSA |
 | `runner/scripts/test_isolation.sh` | Proof that a simulated run cannot reach a real rank |
 
 ## Still open
 
-1. **More programs and more input sizes.** One program tuned to 2% is not a
-   validated simulator. Write a probe for each mechanism first; that is what
-   found both of the corrections above.
+1. More programs again. Three is better than one, but both new kernels stream
+   blocks over a single DPU; a kernel with an irregular access pattern would
+   test something they do not.
 2. More than one rank or channel. The runner uses one of each.
 3. The flat 1.6% left in memory throughput, which the model cannot express
-   exactly because its timing constants are whole cycles.
+   exactly because its timing constants are whole cycles. The three workloads
+   now agree this is the only error left that is large enough to see.
 4. GIMSA.
