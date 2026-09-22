@@ -141,9 +141,31 @@ byte moved, and the error that is left is in the memory rate.
 **This is what the split was for.** `extend` is out by 3.18% where the whole
 kernel is out by 1.19%, so something specific to it is wrong rather than the
 model being uniformly off. It is the phase that walks two sequences comparing
-characters, so it is the one that reads the most and computes the least, and it
-is fast here -- which the memory rate does not explain, because that is 1.6%
-slow. **This is the next thing to chase.**
+characters, so it reads the most and computes the least.
+
+Two things it is **not**. The register file charges nothing extra for the
+64-bit `ld` and `sd` pairs it is built from -- measured, see below -- and the
+memory *rate* is 1.6% slow where this is fast.
+
+What it partly is: **the transfers are 16 bytes** (BIMSA's `SEQT` is 4), and at
+one tasklet the model is 6.7% fast at that size. Charging the DMA engine 14
+more cycles of startup, which is what the machine asks for at 16 bytes, gives:
+
+| section | hardware | as built | with +14 |
+|---|---|---|---|
+| compute | 21149968 | -0.82% | -0.13% |
+| extend | 13825344 | -3.18% | -1.93% |
+| overlap | 6196384 | +0.92% | +2.20% |
+| rings | 2302000 | +0.11% | +2.85% |
+| total | 53120880 | -1.19% | -0.26% |
+
+So about 40% of `extend`'s error is the small-transfer latency, and the rest is
+still unaccounted for. **The change is not a fix**: it over-charges `rings` and
+`overlap`, which make fewer and larger transfers, and that is the same wall the
+MRAM fit hit. The machine's cost per transfer at one tasklet is not one fixed
+cost plus one rate, so no single pair of constants serves every section. A
+model that charged the engine differently when it is idle from when it is busy
+could; none has been measured.
 
 The two totals differ because a tier's own probes cost time and tier 2 has more
 of them. Compare a section against the same tier's total, not across tiers.

@@ -381,10 +381,19 @@ understood:
 
 ### What is left
 
-1. **`extend` in BIMSA's gap-affine aligner, 3.18% fast.** The only part of any
-   measurement so far that is out by more than twice its kernel's total, and
-   the memory rate does not account for it. Tier 2 says where to look; the next
-   step is a probe for whatever that phase does that the others do not.
+1. **`extend` in BIMSA's gap-affine aligner, 3.18% fast**, of which about 40%
+   is accounted for and the rest is not. Two suspects are eliminated: the
+   register file charges nothing extra for the 64-bit `ld`/`sd` pairs the phase
+   is built from (`regbank_sweep.sh` covers them now), and the memory rate is
+   slow where this is fast. What does account for 1.25 of the 3.18 points is
+   that its transfers are 16 bytes, where the one-tasklet latency model is 6.7%
+   fast; charging the engine 14 more cycles of startup takes `extend` to -1.93%
+   and the kernel to -0.26%. **That is not a fix**: it takes `rings` from
+   +0.11% to +2.85% and `overlap` from +0.92% to +2.20%, because they make
+   fewer and larger transfers. The machine's cost per transfer at one tasklet
+   is not one fixed cost plus one rate, so no single pair of constants serves
+   every section. Charging the engine differently when it is idle from when it
+   is busy would; nobody has measured that yet.
 2. More workloads still. Three is better than one, but `hst` and `va` are both
    block-streaming kernels over one DPU; a kernel with an irregular access
    pattern, or one that spans ranks, would test something these do not.
