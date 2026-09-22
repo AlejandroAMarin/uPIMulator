@@ -21,7 +21,7 @@ operation served by simulation. That part works. BIMSA first, GIMSA next.
 | M1 simulator as a library | **Done** |
 | M2 memory and speed | **Done** (147 MB -> 2.5 MB per DPU; 2.26x faster) |
 | M3 libdpu shim | **Done**, BIMSA runs end to end |
-| M4 validation study | **Validated on three workloads.** Instructions match hardware exactly; kernel cycles inside 2.2% over 1-16 tasklets on BIMSA and PrIM's vector addition, and inside 0.15% on PrIM's histogram; transfers inside 4% |
+| M4 validation study | **Validated on four workloads.** Instructions match hardware exactly; kernel cycles inside 2.2% over 1-16 tasklets on BIMSA and PrIM's vector addition, inside 0.15% on PrIM's histogram, and inside 0.25% on GIMSA's lookup phase; transfers inside 4%. GIMSA's binary search is 3.59% fast, which is the one error left |
 | M5 architecture exploration | Not started |
 
 ## The former blocker: eleven functional bugs, all fixed
