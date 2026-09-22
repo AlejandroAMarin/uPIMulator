@@ -59,6 +59,7 @@ type Config struct {
 	// do not describe. Measured at about 40 cycles on this machine, the same
 	// whatever the transfer's size.
 	DmaStartupCycles int
+	DmaBurstSize     int
 
 	ReadBandwidth  int
 	WriteBandwidth int
@@ -117,10 +118,11 @@ func DefaultConfig() Config {
 		// 22, not the 32 upstream assumed. MRAM has no datasheet to read this
 		// off, and 32 made a 2 KB mram_read 23% slower than the machine.
 		// Measured by runner/tests/perf/mram_kernel.c.
-		TCl: 22,
+		TCl: 25,
 		TBl: 8,
 
-		DmaStartupCycles: 42,
+		DmaStartupCycles: 26,
+		DmaBurstSize:     1024,
 
 		ReadBandwidth:  1,
 		WriteBandwidth: 3,
@@ -573,6 +575,7 @@ func (this Config) toCommandLineParser() *misc.CommandLineParser {
 	add_int("t_cl", this.TCl)
 	add_int("t_bl", this.TBl)
 	add_int("dma_startup_cycles", this.DmaStartupCycles)
+	add_int("dma_burst_size", this.DmaBurstSize)
 	add_int("read_bandwidth", this.ReadBandwidth)
 	add_int("write_bandwidth", this.WriteBandwidth)
 

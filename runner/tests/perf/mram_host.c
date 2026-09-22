@@ -3,9 +3,30 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-static const uint32_t SIZES[] = {8, 16, 32, 64, 128, 256, 512, 1024, 2048};
-#define NSIZES (sizeof(SIZES) / sizeof(SIZES[0]))
+static const uint32_t ALL_SIZES[] = {8, 16, 32, 64, 128, 256, 512, 1024, 2048};
+#define NALL (sizeof(ALL_SIZES) / sizeof(ALL_SIZES[0]))
+
+/* XSIZES picks a subset, as "64,512,2048". A short sweep keeps a simulator run
+ * to minutes instead of hours, which matters when the point is a trend over
+ * tasklets rather than the shape over sizes. */
+static uint32_t SIZES[NALL];
+static unsigned NSIZES;
+
+static void select_sizes(void)
+{
+    const char *spec = getenv("XSIZES");
+    char buf[128], *tok;
+
+    if (spec == NULL || *spec == 0) {
+        for (NSIZES = 0; NSIZES < NALL; NSIZES++) SIZES[NSIZES] = ALL_SIZES[NSIZES];
+        return;
+    }
+    snprintf(buf, sizeof(buf), "%s", spec);
+    for (tok = strtok(buf, ","); tok != NULL && NSIZES < NALL; tok = strtok(NULL, ","))
+        SIZES[NSIZES++] = (uint32_t)atoi(tok);
+}
 
 int main(void)
 {
@@ -13,16 +34,21 @@ int main(void)
     uint32_t iters = (uint32_t)atoi(getenv("ITERS") ? getenv("ITERS") : "2000");
     uint32_t nt = (uint32_t)atoi(getenv("TASKLETS") ? getenv("TASKLETS") : "1");
     uint32_t do_write = (uint32_t)atoi(getenv("WRITE") ? getenv("WRITE") : "0");
+    uint32_t spread = (uint32_t)atoi(getenv("SPREAD") ? getenv("SPREAD") : "2048");
     uint32_t cycles[24], instr[24];
+    int only = getenv("XPATTERN") ? atoi(getenv("XPATTERN")) : -1;
     unsigned si;
     int pattern;
+
+    select_sizes();
 
     DPU_ASSERT(dpu_alloc(1, getenv("XPROFILE"), &set));
     DPU_ASSERT(dpu_load(set, getenv("XBIN") ? getenv("XBIN") : "/tmp/mram_dpu", NULL));
 
     printf("pattern\tbytes\tcycles_per_dma\tinstr_per_dma\n");
 
-    for (pattern = 0; pattern < 2; pattern++) {
+    /* XPATTERN=0 is sequential only, 1 is scattered only, unset is both. */
+    for (pattern = only >= 0 ? only : 0; pattern < (only >= 0 ? only + 1 : 2); pattern++) {
         for (si = 0; si < NSIZES; si++) {
             uint32_t size = SIZES[si];
             /* In order, or far enough apart to miss the row buffer every time. */
@@ -35,6 +61,7 @@ int main(void)
                 DPU_ASSERT(dpu_copy_to(dpu, "ITERS", 0, &iters, sizeof(iters)));
                 DPU_ASSERT(dpu_copy_to(dpu, "STRIDE", 0, &stride, sizeof(stride)));
                 DPU_ASSERT(dpu_copy_to(dpu, "DO_WRITE", 0, &do_write, sizeof(do_write)));
+                DPU_ASSERT(dpu_copy_to(dpu, "SPREAD", 0, &spread, sizeof(spread)));
             }
             DPU_ASSERT(dpu_launch(set, DPU_SYNCHRONOUS));
             DPU_FOREACH (set, dpu) {

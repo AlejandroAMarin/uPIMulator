@@ -17,6 +17,9 @@ type Dma struct {
 
 	input_q *dram.DmaCommandQ
 	ready_q *dram.DmaCommandQ
+
+	startup    int64
+	burst_size int64
 }
 
 func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
@@ -31,14 +34,14 @@ func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
 	max_num_tasklets := config_loader.MaxNumTasklets()
 
 	// The DMA engine's own startup, in logic cycles, before a transfer reaches
-	// the memory controller. The hardware charges about 40 cycles for this
-	// whatever the transfer's size, and without it an 8-byte mram_read comes
-	// out 20% faster than the machine. runner/tests/perf/mram_kernel.c measures
-	// it.
-	startup := command_line_parser.IntParameter("dma_startup_cycles")
+	// the memory controller. The machine charges it once per burst, whatever
+	// the burst holds, and it does not overlap the transfer before it.
+	// runner/tests/perf/mram_tasklet_sweep.sh measures both terms.
+	this.startup = command_line_parser.IntParameter("dma_startup_cycles")
+	this.burst_size = command_line_parser.IntParameter("dma_burst_size")
 
 	this.input_q = new(dram.DmaCommandQ)
-	this.input_q.Init(max_num_tasklets, startup)
+	this.input_q.Init(max_num_tasklets, this.startup)
 
 	this.ready_q = new(dram.DmaCommandQ)
 	this.ready_q.Init(max_num_tasklets, 0)
@@ -190,7 +193,15 @@ func (this *Dma) Push(dma_command *dram.DmaCommand) {
 		panic(err)
 	}
 
-	this.input_q.Push(dma_command)
+	// One startup per burst, rounded up. The machine charges a 2 KB transfer
+	// two startups and a 1 KB one only a single startup, with nothing else
+	// between them but the bytes.
+	bursts := (dma_command.Size() + this.burst_size - 1) / this.burst_size
+	if bursts < 1 {
+		bursts = 1
+	}
+
+	this.input_q.PushWithTimer(dma_command, this.startup*bursts)
 }
 
 func (this *Dma) CanPop() bool {
@@ -210,17 +221,22 @@ func (this *Dma) Cycle() {
 	this.ServiceInputQ()
 	this.ServiceReadyQ()
 
-	// Without these the queues' timers never count down. It went unnoticed
-	// while both were zero, and any non-zero startup stalled the DPU forever.
-	// CycleAll, not Cycle: the engine's startup is a latency that several
-	// tasklets' transfers serve at the same time, not an interval between
-	// them.
-	this.input_q.CycleAll()
+	// One engine serves all 24 threads and does one thing at a time: either it
+	// sets a transfer up, or it moves that transfer's bytes. The two do not
+	// overlap, which is why the machine's cost per transfer is the sum of the
+	// two terms and not the larger of them. So the startup only counts down
+	// while the memory controller is idle, and only the transfer at the front
+	// counts at all.
+	if this.memory_controller.IsEmpty() {
+		this.input_q.Cycle()
+	}
+
 	this.ready_q.CycleAll()
 }
 
 func (this *Dma) ServiceInputQ() {
-	if this.input_q.CanPop(1) && this.memory_controller.CanPush() {
+	if this.input_q.CanPop(1) && this.memory_controller.IsEmpty() &&
+		this.memory_controller.CanPush() {
 		dma_command := this.input_q.Pop()
 		this.memory_controller.Push(dma_command)
 	}

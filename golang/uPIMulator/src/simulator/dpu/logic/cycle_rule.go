@@ -7,6 +7,10 @@ import (
 	"uPIMulator/src/misc"
 )
 
+// REG_BANK_PORTS is how many of one instruction's registers a single bank of
+// the register file serves in a cycle.
+const REG_BANK_PORTS = 2
+
 type CycleRule struct {
 	channel_id int
 	rank_id    int
@@ -125,14 +129,10 @@ func (this *CycleRule) ServiceInputQ() {
 	if this.input_q.CanPop(1) && this.wait_q.CanPush(1) {
 		instruction_ := this.input_q.Pop()
 
-		thread_id := this.scoreboard[instruction_].ThreadId()
-		this.reg_sets[thread_id].CollectReadGpRegs(instruction_)
-
-		extra_cycles := this.CalculateExtraCycles(instruction_)
-
-		this.wait_q.PushWithTimer(instruction_, extra_cycles)
-
-		this.stat_factory.Increment("cycle_rule", extra_cycles)
+		// The bank conflict itself is charged where the machine charges it,
+		// against the thread's next issue slot, in Logic.ServiceThreadScheduler.
+		// This stage is only the register read and write-back, one per cycle.
+		this.wait_q.PushWithTimer(instruction_, 0)
 	}
 }
 
@@ -140,16 +140,33 @@ func (this *CycleRule) ServiceWaitQ() {
 	if this.wait_q.CanPop(1) && this.ready_q.CanPush(1) {
 		instruction_ := this.wait_q.Pop()
 		this.ready_q.Push(instruction_)
-
-		thread_id := this.scoreboard[instruction_].ThreadId()
-		this.reg_sets[thread_id].Clear()
-		this.reg_sets[thread_id].CollectWriteGpRegs(instruction_)
 	}
 }
 
-func (this *CycleRule) CalculateExtraCycles(instruction_ *instruction.Instruction) int64 {
-	thread_id := this.scoreboard[instruction_].ThreadId()
-
+// ConflictTurns is how many extra issue slots one instruction loses to the
+// register file. The file has an even bank and an odd bank, and each serves at
+// most two of an instruction's registers in a cycle, counting its destination
+// with its two sources. Three registers of one parity therefore need a second
+// slot.
+//
+// Measured on this machine, at one tasklet where a lost slot is 11 unmistakable
+// cycles (runner/tests/perf/regbank_kernel.c):
+//
+//	add r4, r6, r8  three even        20.8 cycles/instruction, so one slot lost
+//	add r5, r7, r9  three odd         19.6
+//	add r5, r4, r6  two even read     11.0, nothing lost
+//	add r6, r7, r9  two odd read      11.0
+//	add r4, r5, r6  one of each       11.0
+//
+// uPIMulator used to count this instruction's sources together with the
+// register the instruction BEFORE it wrote, and to charge floor(even/2) +
+// floor(odd/2). That fired on pairs the machine serves for free -- a third of
+// every instruction in a plain loop -- and it held the whole DPU's pipeline
+// rather than the thread, so a single tasklet never paid it at all.
+func (this *CycleRule) ConflictTurns(
+	instruction_ *instruction.Instruction,
+	thread_id int,
+) int64 {
 	reg_set := this.reg_sets[thread_id]
 
 	if reg_set.ThreadId() != thread_id {
@@ -157,11 +174,13 @@ func (this *CycleRule) CalculateExtraCycles(instruction_ *instruction.Instructio
 		panic(err)
 	}
 
-	reg_indicies := reg_set.RegIndices()
+	reg_set.Clear()
+	reg_set.CollectReadGpRegs(instruction_)
+	reg_set.CollectWriteGpRegs(instruction_)
 
 	even_counter := 0
 	odd_counter := 0
-	for reg_index, _ := range reg_indicies {
+	for reg_index := range reg_set.RegIndices() {
 		if reg_index%2 == 0 {
 			even_counter++
 		} else {
@@ -169,5 +188,13 @@ func (this *CycleRule) CalculateExtraCycles(instruction_ *instruction.Instructio
 		}
 	}
 
-	return int64(even_counter/2 + odd_counter/2)
+	turns := int64(0)
+	if even_counter > REG_BANK_PORTS {
+		turns += int64(even_counter - REG_BANK_PORTS)
+	}
+	if odd_counter > REG_BANK_PORTS {
+		turns += int64(odd_counter - REG_BANK_PORTS)
+	}
+
+	return turns
 }

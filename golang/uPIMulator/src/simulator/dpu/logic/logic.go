@@ -197,8 +197,30 @@ func (this *Logic) ServiceThreadScheduler() {
 		thread := this.thread_scheduler.Schedule()
 
 		if thread != nil {
+			// A register-bank conflict costs the thread the issue slot after
+			// this one: the turn comes round and nothing starts. The slot is
+			// the DPU's, not the thread's alone, so at one tasklet it is 11
+			// idle cycles and at sixteen it is one cycle another tasklet would
+			// have used. Both are what the machine does. See
+			// CycleRule.ConflictTurns.
+			if thread.StallTurns() > 0 {
+				thread.SetStallTurns(thread.StallTurns() - 1)
+
+				active_tasklets := fmt.Sprintf(
+					"active_tasklets_%d",
+					this.thread_scheduler.NumIssuableThreads(),
+				)
+				this.stat_factory.Increment(active_tasklets, 1)
+
+				return
+			}
+
 			pc := thread.RegFile().ReadPcReg()
 			instruction_ := this.iram.Read(pc)
+
+			turns := this.cycle_rule.ConflictTurns(instruction_, thread.ThreadId())
+			thread.SetStallTurns(turns)
+			this.stat_factory.Increment("cycle_rule", turns)
 
 			this.scoreboard[instruction_] = thread
 

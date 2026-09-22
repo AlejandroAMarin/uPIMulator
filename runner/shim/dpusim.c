@@ -221,13 +221,31 @@ static void report_stats(struct shim_set *set)
         return;
     }
 
-    fprintf(out, "dpu\tlogic_cycle\tnum_instructions\tmemory_cycle\n");
+    /* The last four say where the cycles went: a cycle either issued an
+     * instruction (breakdown_run), found every ready thread waiting on a
+     * transfer (breakdown_dma), or found nothing to issue for another reason
+     * (breakdown_etc). cycle_rule counts the extra cycles the register file
+     * charged. They are what tells a memory problem apart from a scheduling
+     * one. */
+    static const char *const names[] = {
+        "logic_cycle", "num_instructions", "memory_cycle",
+        "breakdown_run", "breakdown_dma", "breakdown_etc", "cycle_rule",
+    };
+    const unsigned nnames = sizeof(names) / sizeof(names[0]);
+
+    fprintf(out, "dpu");
+    for (unsigned n = 0; n < nnames; n++) {
+        fprintf(out, "\t%s", names[n]);
+    }
+    fprintf(out, "\n");
 
     for (uint32_t i = 0; i < set->nr_dpus; i++) {
-        fprintf(out, "%u\t%lld\t%lld\t%lld\n", i,
-            upim_stat(set->handle, (int)i, (char *)"logic_cycle", 0),
-            upim_stat(set->handle, (int)i, (char *)"num_instructions", 0),
-            upim_stat(set->handle, (int)i, (char *)"memory_cycle", 0));
+        fprintf(out, "%u", i);
+        for (unsigned n = 0; n < nnames; n++) {
+            fprintf(out, "\t%lld",
+                upim_stat(set->handle, (int)i, (char *)names[n], 0));
+        }
+        fprintf(out, "\n");
     }
 
     /* Host transfers belong to the set, not to any DPU: one transfer covers

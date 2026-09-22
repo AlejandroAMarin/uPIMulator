@@ -106,6 +106,7 @@ func upim_set_create(program_dir *C.char, num_dpus C.int, num_tasklets C.int) C.
 
 	// Memory timing, so the MRAM model can be refitted without rebuilding.
 	envMbps("UPIM_DMA_STARTUP_CYCLES", &config.DmaStartupCycles)
+	envMbps("UPIM_DMA_BURST_SIZE", &config.DmaBurstSize)
 	envMbps("UPIM_T_CL", &config.TCl)
 	envMbps("UPIM_T_BL", &config.TBl)
 	envMbps("UPIM_T_RCD", &config.TRcd)

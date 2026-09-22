@@ -21,6 +21,7 @@ type Thread struct {
 	thread_state ThreadState
 	reg_file     *reg.RegFile
 	issue_cycle  int64
+	stall_turns  int64
 }
 
 func (this *Thread) Init(thread_id int) {
@@ -42,6 +43,7 @@ func (this *Thread) Init(thread_id int) {
 	this.reg_file.Init(thread_id)
 
 	this.issue_cycle = 0
+	this.stall_turns = 0
 }
 
 func (this *Thread) Fini() {
@@ -77,4 +79,22 @@ func (this *Thread) IncrementIssueCycle() {
 
 func (this *Thread) ResetIssueCycle() {
 	this.issue_cycle = 0
+}
+
+// StallTurns is how many more of this thread's issue slots a register-bank
+// conflict still has to consume before its next instruction can start. The
+// machine charges such a conflict one whole slot: at one tasklet that is the
+// revolver's full 11 cycles, and at sixteen it is the one cycle the slot is
+// worth. runner/tests/perf/regbank_kernel.c measures both.
+func (this *Thread) StallTurns() int64 {
+	return this.stall_turns
+}
+
+func (this *Thread) SetStallTurns(stall_turns int64) {
+	if stall_turns < 0 {
+		err := errors.New("stall turns < 0")
+		panic(err)
+	}
+
+	this.stall_turns = stall_turns
 }

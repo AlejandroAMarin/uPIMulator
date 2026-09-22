@@ -162,13 +162,19 @@ func InitCommandLineParser() *misc.CommandLineParser {
 		"DPU MRAM t_ras timing parameter [cycle]",
 	)
 	command_line_parser.AddOption(misc.INT, "t_rp", "32", "DPU MRAM t_rp timing parameter [cycle]")
-	command_line_parser.AddOption(misc.INT, "t_cl", "22", "DPU MRAM t_cl timing parameter [cycle]")
+	command_line_parser.AddOption(misc.INT, "t_cl", "25", "DPU MRAM t_cl timing parameter [cycle]")
 	command_line_parser.AddOption(misc.INT, "t_bl", "8", "DPU MRAM t_bl timing parameter [cycle]")
 	command_line_parser.AddOption(
 		misc.INT,
 		"dma_startup_cycles",
-		"42",
-		"DPU DMA engine startup before a transfer reaches memory [logic cycle]",
+		"26",
+		"DPU DMA engine startup, charged once per burst [logic cycle]",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
+		"dma_burst_size",
+		"1024",
+		"largest transfer the DPU DMA engine sets up in one go [byte]",
 	)
 
 	command_line_parser.AddOption(
