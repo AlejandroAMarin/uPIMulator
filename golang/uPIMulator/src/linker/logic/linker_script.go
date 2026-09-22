@@ -253,6 +253,19 @@ func (this *LinkerScript) AssignWram(executable *kernel.Executable) {
 
 	// TODO(bongjoon.hyun@gmail.com): figure out ".data.stacks" section
 
+	// The stacks start on an 8-byte boundary, as they do on the machine: its
+	// ".data.stacks" is padded so that every stack starts and ends on one.
+	// A DMA moves 8 bytes at a time and the compiler counts on the stack
+	// being aligned, so a stack that starts 4 bytes off loses the last word
+	// of any transfer out of a local array. Nothing here forced the
+	// alignment before, and the sections in front of the stacks happened to
+	// add up to a multiple of 8 -- until the linker stopped keeping the code
+	// nothing calls, and 188 bytes of a dropped jump table moved the stacks
+	// onto a 4-byte boundary.
+	cur_address = int64(
+		math.Ceil(float64(cur_address)/float64(this.min_access_granularity)),
+	) * this.min_access_granularity
+
 	for i := 0; i < config_loader.MaxNumTasklets(); i++ {
 		sys_stack_thread := "__sys_stack_thread_" + strconv.Itoa(i)
 		this.linker_constants[sys_stack_thread].SetValue(cur_address)

@@ -11,7 +11,7 @@ import (
 	"uPIMulator/src/linker/parser/stmt"
 )
 
-// SectionPruner finds the code nothing can reach.
+// SectionPruner finds the code and the data nothing can reach.
 //
 // uPIMulator resolves symbols one object file at a time: if a program needs
 // any symbol an object defines, every function in that object is linked. The
@@ -22,11 +22,18 @@ import (
 // printf and the stdio chain, and a 630-instruction breakpoint search that the
 // build does not call.
 //
-// The rule is the one --gc-sections uses. A section is live if it is not code,
-// or if it is the entry, or if a live section names a symbol it defines.
-// Everything else goes.
+// The rule is the one --gc-sections uses. A section is live if it is a kind
+// this does not drop, or if it is the entry, or if a live section names a
+// symbol it defines. Everything else goes.
 //
-// Three things have to be got right, and each of them, got wrong, either keeps
+// Read-only data and MRAM data are dropped as well, and both matter. A jump
+// table in .rodata that acts as a root keeps its own function alive and, with
+// it, everything the function calls -- which is how printf survived in a
+// program that never calls it. The 1 MB stdout buffer in .mram.noinit then
+// survives with it, and the program's MRAM heap starts 1 MB higher than it
+// does on the machine.
+//
+// Four things have to be got right, and each of them, got wrong, either keeps
 // everything or throws away something needed:
 //
 //   - A section referring to its own symbols says nothing about whether
@@ -42,6 +49,11 @@ import (
 //     linker renames those to "<file>.<name>" for that reason and so does
 //     Symbol, or a jump table would fail to keep alive the function in its own
 //     file that it points into.
+//   - A data section belongs to the file it is written in as well. ".mram.noinit"
+//     is one output section built from a piece of every object that puts
+//     something there, and the machine's linker drops those pieces one at a
+//     time. Naming them all "mram.noinit" would make one live piece keep every
+//     other alive. See sectionKey.Key.
 type SectionPruner struct {
 	walker *parser.Walker
 
@@ -57,12 +69,68 @@ type SectionPruner struct {
 }
 
 type sectionKey struct {
-	is_text bool
-	name    string
+	is_text  bool
+	prunable bool
+	scope    string
+	name     string
+}
+
+// Key names a section the way both this file and Executable.DropDeadSections
+// name it, so the one that reads the parse tree and the one that reads the
+// text agree. Code sections are named across the whole program, because
+// -ffunction-sections gives every function its own name. Data sections are
+// named per object file: ".mram.noinit" is one output section built from a
+// piece of every object that puts something there, and the machine's linker
+// drops those pieces one at a time.
+func (this sectionKey) Key() string {
+	if this.is_text {
+		return "text." + this.name
+	}
+	return this.scope + "|" + this.name
+}
+
+// prunable_kinds are the section kinds this drops when nothing reaches them.
+// Read-only data holds jump tables and string constants, which only the code
+// beside them reads. MRAM holds the buffers, and the SDK's 1 MB stdout buffer
+// is the one that matters: the machine's linker drops it from a program that
+// never calls printf, so keeping it starts the heap 1 MB above where the
+// machine starts it. The rest of the kinds -- .data, .bss, .atomic, .dpu_host
+// -- are left alone: the runtime and the linker script reach into them by
+// name, not by reference.
+var prunable_kinds = map[lexer.TokenType]string{
+	lexer.RODATA: "rodata",
+	lexer.MRAM:   "mram",
+}
+
+// CheckKinds fails the link if this file and Executable.PrunableSectionKinds
+// do not name the same data section kinds.
+func CheckKinds() {
+	if len(prunable_kinds) != len(kernel.PrunableSectionKinds) {
+		err := fmt.Errorf(
+			"the pruner drops %d data section kinds and the dumper knows %d",
+			len(prunable_kinds),
+			len(kernel.PrunableSectionKinds),
+		)
+		panic(err)
+	}
+
+	known := make(map[string]bool, len(kernel.PrunableSectionKinds))
+	for _, kind := range kernel.PrunableSectionKinds {
+		known[kind] = true
+	}
+
+	for _, kind := range prunable_kinds {
+		if !known[kind] {
+			err := fmt.Errorf("the dumper does not know the %q section kind", kind)
+			panic(err)
+		}
+	}
 }
 
 func (this *SectionPruner) Init() {
-	this.cur = sectionKey{is_text: true, name: ""}
+	CheckKinds()
+
+	this.cur = sectionKey{is_text: true, prunable: true, name: ""}
 	this.in_addrsig = false
 	this.globals = make(map[string]bool)
 	this.definitions = make(map[string]sectionKey)
@@ -104,21 +172,24 @@ func (this *SectionPruner) AddGlobals(relocatable *kernel.Relocatable) {
 func (this *SectionPruner) Analyze(relocatable *kernel.Relocatable) {
 	this.scope = relocatable.Name()
 
-	this.Enter(sectionKey{is_text: true, name: ""})
+	this.Enter(sectionKey{is_text: true, prunable: true, name: ""})
 	this.walker.Walk(relocatable.Ast())
 }
 
-// DeadTextSections names the code sections nothing reaches. The names are the
-// ones a `.section .text.<name>` directive carries.
-func (this *SectionPruner) DeadTextSections() map[string]bool {
+// DeadSections names the sections nothing reaches, by sectionKey.Key.
+func (this *SectionPruner) DeadSections() map[string]bool {
 	live := make(map[sectionKey]bool)
 	queue := make([]sectionKey, 0)
 
-	// Roots: everything that is not code, because data is not what overflows
-	// IRAM and following it is what keeps a function whose address sits in a
-	// table; the default text section; and the entry point.
+	// Roots: every section of a kind this does not drop, because the runtime
+	// and the linker script reach into those by name and following them is
+	// what keeps a function whose address sits in a table; the default text
+	// section; and the entry point.
 	for section := range this.sections {
-		if !section.is_text || section.name == "" || section.name == "__bootstrap" {
+		entry := section.is_text &&
+			(section.name == "" || section.name == "__bootstrap")
+
+		if !section.prunable || entry {
 			live[section] = true
 			queue = append(queue, section)
 		}
@@ -150,21 +221,22 @@ func (this *SectionPruner) DeadTextSections() map[string]bool {
 
 	dead := make(map[string]bool)
 	for section := range this.sections {
-		if section.is_text && !live[section] {
-			dead[section.name] = true
+		if section.prunable && !live[section] {
+			dead[section.Key()] = true
 		}
 	}
 
 	return dead
 }
 
-// TextSections names every code section the pruner saw, so the caller can
-// check its own reading of the assembly against the parser's.
-func (this *SectionPruner) TextSections() map[string]bool {
+// Sections names every section the pruner can drop, whether it drops it or
+// not, so the caller can check its own reading of the assembly against the
+// parser's.
+func (this *SectionPruner) Sections() map[string]bool {
 	names := make(map[string]bool)
 	for section := range this.sections {
-		if section.is_text {
-			names[section.name] = true
+		if section.prunable {
+			names[section.Key()] = true
 		}
 	}
 	return names
@@ -177,7 +249,7 @@ func (this *SectionPruner) Enter(section sectionKey) {
 }
 
 func (this *SectionPruner) WalkTextStmt(stmt_ *stmt.Stmt) {
-	this.Enter(sectionKey{is_text: true, name: ""})
+	this.Enter(sectionKey{is_text: true, prunable: true, name: ""})
 }
 
 func (this *SectionPruner) WalkAddrsigStmt(stmt_ *stmt.Stmt) {
@@ -211,10 +283,7 @@ func (this *SectionPruner) WalkSectionStackSizesStmt(stmt_ *stmt.Stmt) {
 	// or, worse, survive the drop and name a label that is no longer there.
 	section_stmt := stmt_.SectionStackSizesStmt()
 
-	kind := section_stmt.Expr2().SectionNameExpr().Token().TokenType()
-	name := strings.TrimPrefix(this.IdentifierOf(section_stmt.Expr3()), ".")
-
-	this.Enter(sectionKey{is_text: kind == lexer.TEXT, name: name})
+	this.Enter(this.SectionOf(section_stmt.Expr2(), section_stmt.Expr3()))
 }
 
 func (this *SectionPruner) WalkLabelStmt(stmt_ *stmt.Stmt) {
@@ -276,13 +345,24 @@ func (this *SectionPruner) SectionOf(kind_expr *expr.Expr, name_expr *expr.Expr)
 	}
 
 	if token.TokenType() == lexer.TEXT {
-		return sectionKey{is_text: true, name: name}
+		return sectionKey{is_text: true, prunable: true, name: name}
 	}
 
-	// Any other kind is data of some sort. Its own name is enough to keep the
-	// keys apart, and the kind token's text keeps two different kinds with the
-	// same name apart.
-	return sectionKey{is_text: false, name: fmt.Sprintf("%d.%s", token.TokenType(), name)}
+	// Any other kind is data of some sort. The kind's own name keeps two
+	// different kinds with the same name apart, and the object file's name
+	// keeps apart the pieces of one output section. A section with no name of
+	// its own holds whatever the compiler did not give one to, so it stays.
+	kind, prunable := prunable_kinds[token.TokenType()]
+	if !prunable {
+		kind = fmt.Sprintf("%d", token.TokenType())
+	}
+
+	return sectionKey{
+		is_text:  false,
+		prunable: prunable && name != "",
+		scope:    this.scope,
+		name:     kind + "." + name,
+	}
 }
 
 func (this *SectionPruner) IdentifierOf(expr_ *expr.Expr) string {

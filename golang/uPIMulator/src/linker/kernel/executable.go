@@ -22,8 +22,8 @@ type Executable struct {
 	ast          *parser.Ast
 	liveness     *Liveness
 
-	dead_sections     map[string]bool
-	all_text_sections map[string]bool
+	dead_sections map[string]bool
+	all_sections  map[string]bool
 
 	sections    map[*Section]bool
 	cur_section *Section
@@ -92,35 +92,42 @@ func (this *Executable) Liveness() *Liveness {
 }
 
 func (this *Executable) DumpAssembly() {
-	lines := this.benchmark_relocatable.Lines()
+	lines := this.DropDeadSections(
+		this.benchmark_relocatable.Name(),
+		this.benchmark_relocatable.Lines(),
+	)
 
 	for sdk_relocatable, _ := range this.sdk_relocatables {
-		lines = append(lines, sdk_relocatable.Lines()...)
+		lines = append(
+			lines,
+			this.DropDeadSections(sdk_relocatable.Name(), sdk_relocatable.Lines())...,
+		)
 	}
-
-	lines = this.DropDeadSections(lines)
 
 	file_dumper := new(misc.FileDumper)
 	file_dumper.Init(this.path)
 	file_dumper.WriteLines(lines)
 }
 
-// SetDeadSections names the code sections to leave out, and the code sections
-// there are, so that this file's reading of a section directive can be checked
-// against the parser's. See logic.SectionPruner.
+// SetDeadSections names the sections to leave out, and the sections there are,
+// so that this file's reading of a section directive can be checked against
+// the parser's. See logic.SectionPruner.
 func (this *Executable) SetDeadSections(dead map[string]bool, all map[string]bool) {
 	this.dead_sections = dead
-	this.all_text_sections = all
+	this.all_sections = all
 }
 
-// DropDeadSections removes the lines of the code sections nothing reaches.
+// DropDeadSections removes the lines of the sections nothing reaches. It takes
+// one object file at a time, because a data section such as ".mram.noinit" is
+// one output section built from a piece of every object that puts something
+// there, and each piece goes or stays on its own.
 //
 // The executable is dumped as text and read back, so this is the one place a
 // section can be left out without every later stage having to know. Finding
 // where a section begins needs a second reading of the assembly, which is a
 // thing to be careful with: the check below fails the link rather than let a
-// misreading quietly drop code that was needed.
-func (this *Executable) DropDeadSections(lines []string) []string {
+// misreading quietly drop something that was needed.
+func (this *Executable) DropDeadSections(scope string, lines []string) []string {
 	if this.dead_sections == nil || len(this.dead_sections) == 0 {
 		return lines
 	}
@@ -130,10 +137,10 @@ func (this *Executable) DropDeadSections(lines []string) []string {
 	drop := false
 
 	for _, line := range lines {
-		if name, is_text, is_section := sectionOfLine(line); is_section {
-			if is_text {
-				seen[name] = true
-				drop = this.dead_sections[name]
+		if key, tracked, is_section := sectionOfLine(scope, line); is_section {
+			if tracked {
+				seen[key] = true
+				drop = this.dead_sections[key]
 			} else {
 				drop = false
 			}
@@ -144,12 +151,12 @@ func (this *Executable) DropDeadSections(lines []string) []string {
 		}
 	}
 
-	for name := range seen {
-		if !this.all_text_sections[name] {
+	for key := range seen {
+		if !this.all_sections[key] {
 			err := fmt.Errorf(
-				"the assembly has a code section %q that the parser did not report; "+
+				"the assembly has a section %q that the parser did not report; "+
 					"reading section directives and parsing them disagree, so nothing was dropped",
-				name,
+				key,
 			)
 			panic(err)
 		}
@@ -158,14 +165,24 @@ func (this *Executable) DropDeadSections(lines []string) []string {
 	return kept
 }
 
-// sectionOfLine reports the section a directive opens: its name, whether it
-// holds code, and whether the line was a section directive at all. The forms
-// are "\t.text" and "\t.section\t.text.<name>,...", as clang emits them.
-func sectionOfLine(line string) (string, bool, bool) {
+// PrunableSectionKinds are the data section kinds DropDeadSections is able to
+// leave out. logic.SectionPruner decides which sections those are, and it
+// checks this list against its own: the two read the same assembly by
+// different routes, and a kind in one list and not in the other makes them
+// disagree about what a section is called.
+var PrunableSectionKinds = []string{"rodata", "mram"}
+
+// sectionOfLine reports the section a directive opens: the name both this file
+// and the pruner give it, whether it is a kind the pruner tracks, and whether
+// the line was a section directive at all. The forms are "\t.text" and
+// "\t.section\t.text.<name>,...", as clang emits them.
+//
+// Keep this in step with logic.sectionKey.Key and logic.prunable_kinds.
+func sectionOfLine(scope string, line string) (string, bool, bool) {
 	trimmed := strings.TrimSpace(line)
 
 	if trimmed == ".text" {
-		return "", true, true
+		return "text.", true, true
 	}
 
 	if !strings.HasPrefix(trimmed, ".section") {
@@ -188,19 +205,31 @@ func sectionOfLine(line string) (string, bool, bool) {
 	}
 
 	if name == ".text" {
-		return "", true, true
+		return "text.", true, true
 	}
+
 	if strings.HasPrefix(name, ".text.") {
-		// The lexer's identifier pattern allows one leading dot and no others,
-		// so ".text.stdlib.stdio.f" arrives as four tokens and the parser keeps
-		// only the last as the section's name. Two sections whose names differ
-		// only in an earlier component therefore share one section here, which
-		// is how the linker already behaves; for liveness it only ever keeps
-		// more, never less.
-		return name[strings.LastIndex(name, ".")+1:], true, true
+		return "text." + sectionName(scope, strings.TrimPrefix(name, ".text.")), true, true
+	}
+
+	for _, kind := range PrunableSectionKinds {
+		if strings.HasPrefix(name, "."+kind+".") {
+			return scope + "|" + kind + "." +
+				sectionName(scope, strings.TrimPrefix(name, "."+kind+".")), true, true
+		}
 	}
 
 	return name, false, true
+}
+
+// sectionName takes the scope back off a section's name. Relocatable.Lines
+// puts the object file's name in front of every local symbol, and a section
+// directive that names one -- ".section .text.f" for a static f -- is rewritten
+// with the rest: the parser reads "f" from the object and this reads
+// "<file>.f". A name that is not a symbol, such as ".rodata.str1.1", is left
+// alone, so the scope only comes off when it is there.
+func sectionName(scope string, name string) string {
+	return strings.TrimPrefix(name, scope+".")
 }
 
 func (this *Executable) DumpAddresses(path string) {

@@ -241,9 +241,9 @@ func (this *Linker) PruneSections() {
 		pruner.Analyze(sdk_relocatable)
 	}
 
-	dead := pruner.DeadTextSections()
+	dead := pruner.DeadSections()
 	if len(dead) > 0 {
-		fmt.Printf("Dropping %d code sections nothing reaches...\n", len(dead))
+		fmt.Printf("Dropping %d sections nothing reaches...\n", len(dead))
 		// UPIM_DUMP_SECTIONS names them, which is what to look at first if a
 		// program that links on the machine stops linking here.
 		if os.Getenv("UPIM_DUMP_SECTIONS") != "" {
@@ -253,7 +253,13 @@ func (this *Linker) PruneSections() {
 		}
 	}
 
-	this.executable.SetDeadSections(dead, pruner.TextSections())
+	if os.Getenv("UPIM_DUMP_SECTIONS") != "" {
+		for name := range pruner.Sections() {
+			fmt.Printf("  section %q\n", name)
+		}
+	}
+
+	this.executable.SetDeadSections(dead, pruner.Sections())
 }
 
 func (this *Linker) HasResolved() bool {
