@@ -149,7 +149,17 @@ func (this *LinkerScript) AssignIram(executable *kernel.Executable) {
 	}
 
 	if cur_address >= config_loader.IramOffset()+config_loader.IramSize() {
-		err := errors.New("address is larger than the IRAM end address")
+		// Say by how much. uPIMulator pulls in whole SDK objects where the
+		// real linker drops the functions nobody calls, so a kernel that fits
+		// the machine can still overflow here, and the first thing anyone
+		// needs to know is whether it is over by a little or by a lot.
+		used := cur_address - config_loader.IramOffset()
+		width := int64(config_loader.IramDataWidth() / 8)
+		err := fmt.Errorf(
+			"IRAM overflow: the program needs %d instructions and there is room for %d",
+			used/width,
+			config_loader.IramSize()/width,
+		)
 		panic(err)
 	}
 }
@@ -277,44 +287,31 @@ func (this *LinkerScript) AssignMram(executable *kernel.Executable) {
 
 	cur_address := config_loader.MramOffset()
 
-	for section, _ := range executable.Sections(kernel.DEBUG_ABBREV) {
-		section.SetAddress(cur_address)
-		cur_address += section.Size()
+	// Debug and stack-size sections are metadata. The machine's linker marks
+	// them not-allocated and they occupy no memory there at all, but this one
+	// used to lay them at the bottom of MRAM, ahead of the program's own data.
+	// That cost BIMSA 104 bytes and, worse, pushed the heap off the boundary
+	// the machine puts it on: 1 MB + 104 instead of 1 MB. Every buffer the
+	// program then allocated straddled the 1 KB wordlines differently from the
+	// machine, which is worth a few tenths of a percent on a kernel that moves
+	// much data. Park them one past the end of MRAM, where Executable.Sort
+	// leaves them out of the image and they push nothing.
+	metadata_address := config_loader.MramOffset() + config_loader.MramSize()
+	metadata := []kernel.SectionName{
+		kernel.DEBUG_ABBREV,
+		kernel.DEBUG_FRAME,
+		kernel.DEBUG_INFO,
+		kernel.DEBUG_LINE,
+		kernel.DEBUG_LOC,
+		kernel.DEBUG_RANGES,
+		kernel.DEBUG_STR,
+		kernel.STACK_SIZES,
 	}
 
-	for section, _ := range executable.Sections(kernel.DEBUG_FRAME) {
-		section.SetAddress(cur_address)
-		cur_address += section.Size()
-	}
-
-	for section, _ := range executable.Sections(kernel.DEBUG_INFO) {
-		section.SetAddress(cur_address)
-		cur_address += section.Size()
-	}
-
-	for section, _ := range executable.Sections(kernel.DEBUG_LINE) {
-		section.SetAddress(cur_address)
-		cur_address += section.Size()
-	}
-
-	for section, _ := range executable.Sections(kernel.DEBUG_LOC) {
-		section.SetAddress(cur_address)
-		cur_address += section.Size()
-	}
-
-	for section, _ := range executable.Sections(kernel.DEBUG_RANGES) {
-		section.SetAddress(cur_address)
-		cur_address += section.Size()
-	}
-
-	for section, _ := range executable.Sections(kernel.DEBUG_STR) {
-		section.SetAddress(cur_address)
-		cur_address += section.Size()
-	}
-
-	for section, _ := range executable.Sections(kernel.STACK_SIZES) {
-		section.SetAddress(cur_address)
-		cur_address += section.Size()
+	for _, section_name := range metadata {
+		for section := range executable.Sections(section_name) {
+			section.SetAddress(metadata_address)
+		}
 	}
 
 	noinit := executable.Section(kernel.MRAM, "noinit")

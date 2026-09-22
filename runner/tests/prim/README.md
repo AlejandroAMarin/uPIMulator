@@ -25,21 +25,21 @@ is changed to suit the simulator measures the simulator, not the machine.
 
 | tasklets | cycles hw | cycles sim | error | instructions |
 |---|---|---|---|---|
-| 1 | 1391184 | 1397248 | +0.44% | exact |
-| 2 | 728976 | 731360 | +0.33% | -0.01% |
-| 4 | 371216 | 372784 | +0.42% | +0.00% |
-| 8 | 198864 | 202080 | +1.62% | +0.01% |
-| 16 | 146720 | 149936 | +2.19% | -0.57% |
+| 1 | 1391344 | 1394944 | +0.26% | exact |
+| 2 | 728976 | 729472 | +0.07% | -0.01% |
+| 4 | 370720 | 371776 | +0.28% | +0.00% |
+| 8 | 199664 | 201392 | +0.87% | +0.01% |
+| 16 | 145808 | 149056 | +2.23% | -0.57% |
 
 **`hst` — shared histogram**
 
 | tasklets | cycles hw | cycles sim | error | instructions |
 |---|---|---|---|---|
-| 1 | 4741856 | 4735472 | -0.13% | exact |
-| 2 | 2387584 | 2385744 | -0.08% | -0.00% |
-| 4 | 1205600 | 1205264 | -0.03% | -0.01% |
-| 8 | 617792 | 617264 | -0.09% | -0.01% |
-| 16 | 467296 | 467040 | -0.05% | -0.16% |
+| 1 | 4739712 | 4735392 | -0.09% | exact |
+| 2 | 2387488 | 2385328 | -0.09% | -0.00% |
+| 4 | 1205600 | 1205152 | -0.04% | -0.01% |
+| 8 | 617584 | 617232 | -0.06% | -0.01% |
+| 16 | 467312 | 467008 | -0.07% | -0.07% |
 
 ## Input size
 
@@ -66,9 +66,9 @@ the fixed cost of a launch rather than the kernel. `hst` is flat.
 
 | workload | transfers per 1 KB of work | error |
 |---|---|---|
-| `hst` | one read | -0.03% to -0.13% |
-| BIMSA | short scattered reads and writes | +1.21% to +2.16% |
-| `va` | two reads and one write | +0.33% to +2.19% |
+| `hst` | one read | -0.04% to -0.09% |
+| BIMSA | short scattered reads and writes | +1.48% to +2.12% |
+| `va` | two reads and one write | +0.07% to +2.23% |
 
 That is what a per-byte memory rate 1.6% above the machine's predicts, and it
 is the one error `runner/tests/perf` still records. A kernel that barely

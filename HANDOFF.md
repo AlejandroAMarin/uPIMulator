@@ -81,11 +81,11 @@ calibration behind it in `runner/tests/perf/README.md`.
 
 | tasklets | cycles, hardware | cycles, uPIMulator | error |
 |---|---|---|---|
-| 1 | 7503040 | 7660720 | +2.10% |
-| 2 | 7556384 | 7719440 | +2.16% |
-| 4 | 7777440 | 7894560 | +1.51% |
-| 8 | 8408720 | 8510288 | +1.21% |
-| 16 | 8449344 | 8563696 | +1.35% |
+| 1 | 7505888 | 7662192 | +2.08% |
+| 2 | 7560624 | 7721024 | +2.12% |
+| 4 | 7770176 | 7907968 | +1.77% |
+| 8 | 8364256 | 8504336 | +1.67% |
+| 16 | 8412144 | 8536832 | +1.48% |
 
 Instruction counts match exactly at 1 tasklet, +0.03% at 4, +0.12% at 16.
 
@@ -94,11 +94,11 @@ tasklets:
 
 | DPUs | cycles, hardware | cycles, uPIMulator | error |
 |---|---|---|---|
-| 1 | 1896656 | 1931712 | +1.85% |
-| 2 | 3895792 | 3960496 | +1.66% |
-| 4 | 7813408 | 7920992 | +1.38% |
-| 8 | 15601984 | 15841984 | +1.54% |
-| 16 | 31240480 | 31683968 | +1.42% |
+| 1 | 1895584 | 1931648 | +1.90% |
+| 2 | 3914576 | 3956080 | +1.06% |
+| 4 | 7793488 | 7912160 | +1.52% |
+| 8 | 15577120 | 15824320 | +1.59% |
+| 16 | 31253920 | 31648640 | +1.26% |
 
 The error does not grow with the DPU count. uPIMulator's per-DPU figure is
 identical to the digit from 2 DPUs up and the hardware's is constant to 0.2%,
@@ -118,7 +118,7 @@ Two corrections removed the trend, and they had to be made together:
 
 Either alone makes BIMSA look worse, because the two errors cancelled.
 
-What is left is a flat +1.2% to +2.2%, and the MRAM measurement accounts for
+What is left is a flat +1.5% to +2.1%, and the MRAM measurement accounts for
 it: the per-byte rate is 1.6% high because `t_cl` counts whole memory cycles
 and one step of it is worth 3.3%.
 
@@ -197,6 +197,58 @@ and `Logic.ServiceThreadScheduler` spends the thread's next issue slot on the
 penalty. Nine of eleven measured register layouts agree within 0.3%, at 1
 tasklet and 16 alike. `runner/tests/perf/regbank_kernel.c` holds it.
 
+### The linker keeps only the code something reaches
+
+uPIMulator resolved symbols one object file at a time: needing any symbol an
+object defines linked every function in it. The SDK compiles one function per
+section and the machine's linker drops the ones nobody calls, so a kernel that
+fits the machine could still overflow the 4096-instruction IRAM here. BIMSA's
+gap-affine kernel is 3795 instructions on the machine and was 6522, so it could
+not be run at all.
+
+`logic.SectionPruner` applies the rule `--gc-sections` uses: a section is live
+if it is not code, or it is the entry, or a live section names a symbol it
+defines. The affine kernel now links at 4062 instructions.
+
+Three things had to be right, and each of them cost a debugging round:
+
+- **`.addrsig_sym` must not count.** That list names every symbol whose address
+  is taken anywhere, so counting it keeps everything alive. The machine's
+  linker ignores it for this purpose too.
+- **A section naming its own symbols says nothing.** Every function has a
+  `.Lfunc_end0` and names it in its own `.size` directive. Without resolving a
+  reference inside its own section first, the first function to define one is
+  kept alive by every other function in the program.
+- **A `.stack_sizes` block belongs to the function it describes.** It names
+  that function's labels, so it has to go when the function goes, or the link
+  fails on a label that is no longer there.
+
+`UPIM_NO_PRUNE=1` turns it off and `UPIM_DUMP_SECTIONS=1` names what went, which
+is what to reach for if a program that links on the machine stops linking here.
+
+The check that pruning is safe is that it cannot change a program that already
+fitted: PrIM's vector addition gives the same 149936 cycles and 120704
+instructions either way.
+
+### Metadata does not belong in MRAM
+
+Found while checking the above. `.stack_sizes` and the debug sections are
+metadata; the machine's linker marks them not-allocated and they occupy no
+memory there. uPIMulator laid them at the bottom of MRAM, ahead of the
+program's own data, which cost BIMSA 104 bytes and put the heap at 1 MB + 104
+where the machine puts it at exactly 1 MB.
+
+That is worth more than it sounds. Every buffer the program allocates then
+straddles the 1 KB wordlines differently from the machine, and a 16-byte shift
+in the heap was measured to move BIMSA's cycle count by 0.32%. They are now
+parked one past the end of MRAM, where `Executable.Sort` leaves them out of the
+image, and `__sys_used_mram_end` matches the machine's `0x08100000` exactly.
+
+**Check the heap addresses agree before trusting a new workload's numbers.**
+`readelf -sW <dpu binary> | grep __sys_used_mram_end` against
+`values.txt` in the program directory. They should differ only by
+`MramOffset()`, which is 512 KB.
+
 ### Two traps when you change the model
 
 - **`script/build.py` does not build the runner.** It builds the standalone
@@ -256,6 +308,47 @@ rate, and a scatter of large buffers to many DPUs falls below the link because
 the host has to gather them. `runner/tests/perf/README.md` has both, with the
 residual at every point.
 
+### Section by section
+
+`runner/tests/perf/tier_sweep.sh` splits a BIMSA run by its own probes. A model
+that is right overall for the wrong reasons shows up there as one section much
+further out than the total. Gap-affine, one tasklet, 16 pairs:
+
+| section | hardware | uPIMulator | error | calls |
+|---|---|---|---|---|
+| align | 42757904 | 42506880 | -0.59% | 112 |
+| base | 6040752 | 5992608 | -0.80% | 64 |
+| queue | 52400 | 52272 | -0.24% | 96 |
+| setup | 29296 | 28944 | -1.20% | 32 |
+| total | 49180256 | 48875264 | -0.62% | 16 |
+
+Everything inside 1.2%, every call count exact. Gap-affine as a whole is closer
+than edit distance (-0.62% against +1.5% to +2.1%), which fits the rest: it
+does far more arithmetic per byte moved.
+
+Tier 2 moves the probes inside the aligner, and that is where the split earns
+its keep:
+
+| section | hardware | uPIMulator | error | calls |
+|---|---|---|---|---|
+| compute | 21149968 | 20977376 | -0.82% | 1488 |
+| extend | 13825344 | 13385856 | -3.18% | 1712 |
+| overlap | 6196384 | 6253248 | +0.92% | 400 |
+| rings | 2302000 | 2304544 | +0.11% | 336 |
+| total | 53120880 | 52486960 | -1.19% | 16 |
+
+**`extend` is out by 3.18% where the whole kernel is out by 1.19%**, so
+something specific to that phase is wrong rather than the model being uniformly
+off. It walks two sequences comparing characters, so it reads the most and
+computes the least, and it is *fast* here -- which the memory rate does not
+explain, because that is 1.6% slow. Chase this next.
+
+Compare a section against its own tier's total, never across tiers: a tier's
+probes cost time and tier 2 has more of them.
+
+**This kernel is why the linker had to learn to drop dead code.** At 4062
+instructions it only fits IRAM because of that; before, it needed 6522.
+
 ### Three workloads, and what they say together
 
 `runner/tests/prim/run.sh` adds two of PrIM's own kernels, taken unchanged
@@ -288,26 +381,32 @@ understood:
 
 ### What is left
 
-1. More workloads still. Three is better than one, but `hst` and `va` are both
+1. **`extend` in BIMSA's gap-affine aligner, 3.18% fast.** The only part of any
+   measurement so far that is out by more than twice its kernel's total, and
+   the memory rate does not account for it. Tier 2 says where to look; the next
+   step is a probe for whatever that phase does that the others do not.
+2. More workloads still. Three is better than one, but `hst` and `va` are both
    block-streaming kernels over one DPU; a kernel with an irregular access
    pattern, or one that spans ranks, would test something these do not.
-2. More than one rank or channel. The runner puts every DPU on one of each, so
+3. More than one rank or channel. The runner puts every DPU on one of each, so
    that topology is still untested.
-3. The flat +1.6% left in MRAM throughput. `t_cl` counts whole memory cycles
+4. The flat +1.6% left in MRAM throughput. `t_cl` counts whole memory cycles
    and one step is worth 3.3%, so the model cannot express the machine's rate
    exactly. Do not fix it by moving `memory_frequency`, which is a documented
    number, unless something else justifies the change.
-4. Two register layouts the bank-conflict rule still gets wrong, each by one
+5. Two register layouts the bank-conflict rule still gets wrong, each by one
    issue slot per loop iteration, at the boundary between one instruction and
    the next. A rule over pairs of instructions might catch them; none has been
    measured.
-5. Transfers as simulated traffic rather than an analytic charge. Only needed
+6. Transfers as simulated traffic rather than an analytic charge. Only needed
    for a study where transfers overlap a kernel; they do not here.
-6. GIMSA.
+7. GIMSA.
 
-`PERF_TIER=1` is a dead end for this workload: with edit distance its `align`,
-`base` and `queue` probes record no calls and 99.6% of the time lands in
-`other`. A gap-affine input would be needed.
+`PERF_TIER=1` needs a gap-affine build, not an edit-distance one: every tier-1
+and tier-2 probe sits in the gap-affine path, so edit distance reports no calls
+for any of them and 99.6% of the time in `other`.
+`runner/tests/perf/tier_sweep.sh` builds it that way, and every section comes
+out inside 1.2% with the call counts exact.
 
 ## Safety: never touch the hardware from a simulated run
 
@@ -351,6 +450,9 @@ the only commands allowed to ask for `backend=hw`, and they must be deliberate.
 
     # PrIM kernels on hardware vs the simulator (asks for backend=hw)
     uPIMulator/runner/tests/prim/run.sh
+
+    # BIMSA section by section, gap-affine (asks for backend=hw)
+    uPIMulator/runner/tests/perf/tier_sweep.sh
 
     # MRAM latency at one tasklet, hardware vs the simulator
     uPIMulator/runner/tests/perf/mram_sweep.sh

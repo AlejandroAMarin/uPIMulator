@@ -9,7 +9,8 @@ the error. This is the study the runner was built for.
 
 BIMSA, `inputs/n2_l129_e2.seq` repeated to 16 pairs, edit distance, 1 DPU,
 `MAX_DISTANCE_THRESHOLD=50`, `PERF_TIER=3`, `DYNAMIC=0 BATCH_SIZE=0`.
-Cycle counts measured 2026-09-22, instruction counts 2026-09-17. Instruction
+Cycle counts measured 2026-09-22 at the end of the linker work, instruction
+counts 2026-09-17. Instruction
 counts do not depend on the timing model, so they were not measured again.
 
 **Instruction counts — the functional model.**
@@ -24,11 +25,11 @@ counts do not depend on the timing model, so they were not measured again.
 
 | tasklets | hardware | uPIMulator | error | after the MRAM fit | first measurement |
 |---|---|---|---|---|---|
-| 1 | 7503040 | 7660720 | +2.10% | +0.61% | -4.86% |
-| 2 | 7556384 | 7719440 | +2.16% | +0.44% | -4.93% |
-| 4 | 7777440 | 7894560 | +1.51% | -0.93% | -5.29% |
-| 8 | 8408720 | 8510288 | +1.21% | +2.89% | +1.68% |
-| 16 | 8449344 | 8563696 | +1.35% | +3.51% | +2.54% |
+| 1 | 7505888 | 7662192 | +2.08% | +0.61% | -4.86% |
+| 2 | 7560624 | 7721024 | +2.12% | +0.44% | -4.93% |
+| 4 | 7770176 | 7907968 | +1.77% | -0.93% | -5.29% |
+| 8 | 8364256 | 8504336 | +1.67% | +2.89% | +1.68% |
+| 16 | 8412144 | 8536832 | +1.48% | +3.51% | +2.54% |
 
 Hardware run-to-run variation is 0.04%, so these are real.
 
@@ -92,6 +93,60 @@ The numbers above are the first fit, which read the latency alone. **MRAM under
 contention** below corrects the same two constants against the throughput as
 well, and settles the startup's semantics: it is one engine, doing one thing at
 a time.
+
+## Section by section, and the gap-affine kernel
+
+    runner/tests/perf/tier_sweep.sh
+
+The tables above compare whole kernels. BIMSA's own probes split a run further,
+and a model that is right overall for the wrong reasons shows up here as one
+section much further out than the total.
+
+It builds gap-affine deliberately. Every tier-1 and tier-2 probe sits in the
+gap-affine path, so an edit-distance build reports no calls for any of them and
+99.6% of the time in `other` -- which is how this looked the first time it was
+tried. Gap-affine is also the larger kernel: at 4062 instructions it only fits
+the 4096-instruction IRAM because the linker now drops the code nothing
+reaches.
+
+**Tier 1, where a pair's time goes.** One tasklet, one DPU, 16 pairs.
+
+| section | hardware | uPIMulator | error | calls |
+|---|---|---|---|---|
+| align | 42757904 | 42506880 | -0.59% | 112 |
+| base | 6040752 | 5992608 | -0.80% | 64 |
+| queue | 52400 | 52272 | -0.24% | 96 |
+| setup | 29296 | 28944 | -1.20% | 32 |
+| total | 49180256 | 48875264 | -0.62% | 16 |
+
+Every section is inside 1.2% and every call count is exact. The error is spread
+evenly rather than concentrated, which is what a model that is right for the
+right reasons looks like.
+
+Gap-affine as a whole is closer than edit distance is (-0.62% against +1.5% to
++2.1%), and that fits the rest of the picture: it does far more arithmetic per
+byte moved, and the error that is left is in the memory rate.
+
+**Tier 2, where the aligner's time goes.** Same run, the probes moved inside
+`aff_align`.
+
+| section | hardware | uPIMulator | error | calls |
+|---|---|---|---|---|
+| compute | 21149968 | 20977376 | -0.82% | 1488 |
+| extend | 13825344 | 13385856 | -3.18% | 1712 |
+| overlap | 6196384 | 6253248 | +0.92% | 400 |
+| rings | 2302000 | 2304544 | +0.11% | 336 |
+| total | 53120880 | 52486960 | -1.19% | 16 |
+
+**This is what the split was for.** `extend` is out by 3.18% where the whole
+kernel is out by 1.19%, so something specific to it is wrong rather than the
+model being uniformly off. It is the phase that walks two sequences comparing
+characters, so it is the one that reads the most and computes the least, and it
+is fast here -- which the memory rate does not explain, because that is 1.6%
+slow. **This is the next thing to chase.**
+
+The two totals differ because a tier's own probes cost time and tier 2 has more
+of them. Compare a section against the same tier's total, not across tiers.
 
 ## Register-file bank conflicts
 
@@ -190,13 +245,13 @@ input regenerated each time so the work per DPU stays fixed.
 
 | DPUs | pairs | hardware | uPIMulator | error | first measurement |
 |---|---|---|---|---|---|
-| 1 | 4 | 1896656 | 1931712 | +1.85% | -4.88% |
-| 2 | 8 | 3895792 | 3960496 | +1.66% | -5.29% |
-| 4 | 16 | 7813408 | 7920992 | +1.38% | -5.48% |
-| 8 | 32 | 15601984 | 15841984 | +1.54% | -5.36% |
-| 16 | 64 | 31240480 | 31683968 | +1.42% | -5.45% |
+| 1 | 4 | 1895584 | 1931648 | +1.90% | -4.88% |
+| 2 | 8 | 3914576 | 3956080 | +1.06% | -5.29% |
+| 4 | 16 | 7793488 | 7912160 | +1.52% | -5.48% |
+| 8 | 32 | 15577120 | 15824320 | +1.59% | -5.36% |
+| 16 | 64 | 31253920 | 31648640 | +1.26% | -5.45% |
 
-The error does not grow with the DPU count, and it is the same +1.4% to +1.9%
+The error does not grow with the DPU count, and it is the same +1.1% to +1.9%
 the tasklet sweep shows. uPIMulator's per-DPU figure is identical to the digit
 from 2 DPUs up and the hardware's is constant to 0.3%: DPUs share nothing
 during a kernel on either side, and the model composes accordingly.

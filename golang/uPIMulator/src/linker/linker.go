@@ -204,6 +204,7 @@ func (this *Linker) MakeExecutable() {
 
 	this.executable.SetBenchmarkRelocatable(this.benchmark_relocatable)
 	this.ResolveSymbols()
+	this.PruneSections()
 
 	executable_path := filepath.Join(this.bin_dirpath, "main.S")
 
@@ -211,6 +212,48 @@ func (this *Linker) MakeExecutable() {
 
 	this.executable.SetPath(executable_path)
 	this.executable.DumpAssembly()
+}
+
+// PruneSections drops the code nothing can reach. Symbols are resolved one
+// object file at a time, so taking any symbol from an object brings in every
+// function it holds; the SDK gives each function its own section and the real
+// linker drops the ones nobody calls. Without this, BIMSA's gap-affine kernel
+// needs 6522 instructions where the machine's own linker produces 3795, and
+// the IRAM holds 4096. See logic.SectionPruner.
+func (this *Linker) PruneSections() {
+	// UPIM_NO_PRUNE=1 turns it off, which is the first thing to try if a
+	// program stops linking or stops behaving after a change here.
+	if os.Getenv("UPIM_NO_PRUNE") == "1" {
+		fmt.Println("Section pruning is off (UPIM_NO_PRUNE=1)")
+		return
+	}
+
+	pruner := new(logic.SectionPruner)
+	pruner.Init()
+
+	pruner.AddGlobals(this.benchmark_relocatable)
+	for sdk_relocatable := range this.executable.SdkRelocatables() {
+		pruner.AddGlobals(sdk_relocatable)
+	}
+
+	pruner.Analyze(this.benchmark_relocatable)
+	for sdk_relocatable := range this.executable.SdkRelocatables() {
+		pruner.Analyze(sdk_relocatable)
+	}
+
+	dead := pruner.DeadTextSections()
+	if len(dead) > 0 {
+		fmt.Printf("Dropping %d code sections nothing reaches...\n", len(dead))
+		// UPIM_DUMP_SECTIONS names them, which is what to look at first if a
+		// program that links on the machine stops linking here.
+		if os.Getenv("UPIM_DUMP_SECTIONS") != "" {
+			for name := range dead {
+				fmt.Printf("  dropped %q\n", name)
+			}
+		}
+	}
+
+	this.executable.SetDeadSections(dead, pruner.TextSections())
 }
 
 func (this *Linker) HasResolved() bool {

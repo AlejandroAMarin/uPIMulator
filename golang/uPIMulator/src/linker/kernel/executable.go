@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"uPIMulator/src/abi/encoding"
 	"uPIMulator/src/linker/lexer"
 	"uPIMulator/src/linker/parser"
@@ -20,6 +21,9 @@ type Executable struct {
 	token_stream *lexer.TokenStream
 	ast          *parser.Ast
 	liveness     *Liveness
+
+	dead_sections     map[string]bool
+	all_text_sections map[string]bool
 
 	sections    map[*Section]bool
 	cur_section *Section
@@ -52,6 +56,12 @@ func (this *Executable) SetBenchmarkRelocatable(relocatable *Relocatable) {
 	this.benchmark_relocatable = relocatable
 
 	this.UpdateUnresolvedSymbols(relocatable)
+}
+
+// SdkRelocatables are the SDK objects the executable takes, which is what the
+// section pruner has to read besides the benchmark's own.
+func (this *Executable) SdkRelocatables() map[*Relocatable]bool {
+	return this.sdk_relocatables
 }
 
 func (this *Executable) AddSdkRelocatable(relocatable *Relocatable) {
@@ -88,9 +98,109 @@ func (this *Executable) DumpAssembly() {
 		lines = append(lines, sdk_relocatable.Lines()...)
 	}
 
+	lines = this.DropDeadSections(lines)
+
 	file_dumper := new(misc.FileDumper)
 	file_dumper.Init(this.path)
 	file_dumper.WriteLines(lines)
+}
+
+// SetDeadSections names the code sections to leave out, and the code sections
+// there are, so that this file's reading of a section directive can be checked
+// against the parser's. See logic.SectionPruner.
+func (this *Executable) SetDeadSections(dead map[string]bool, all map[string]bool) {
+	this.dead_sections = dead
+	this.all_text_sections = all
+}
+
+// DropDeadSections removes the lines of the code sections nothing reaches.
+//
+// The executable is dumped as text and read back, so this is the one place a
+// section can be left out without every later stage having to know. Finding
+// where a section begins needs a second reading of the assembly, which is a
+// thing to be careful with: the check below fails the link rather than let a
+// misreading quietly drop code that was needed.
+func (this *Executable) DropDeadSections(lines []string) []string {
+	if this.dead_sections == nil || len(this.dead_sections) == 0 {
+		return lines
+	}
+
+	kept := make([]string, 0, len(lines))
+	seen := make(map[string]bool)
+	drop := false
+
+	for _, line := range lines {
+		if name, is_text, is_section := sectionOfLine(line); is_section {
+			if is_text {
+				seen[name] = true
+				drop = this.dead_sections[name]
+			} else {
+				drop = false
+			}
+		}
+
+		if !drop {
+			kept = append(kept, line)
+		}
+	}
+
+	for name := range seen {
+		if !this.all_text_sections[name] {
+			err := fmt.Errorf(
+				"the assembly has a code section %q that the parser did not report; "+
+					"reading section directives and parsing them disagree, so nothing was dropped",
+				name,
+			)
+			panic(err)
+		}
+	}
+
+	return kept
+}
+
+// sectionOfLine reports the section a directive opens: its name, whether it
+// holds code, and whether the line was a section directive at all. The forms
+// are "\t.text" and "\t.section\t.text.<name>,...", as clang emits them.
+func sectionOfLine(line string) (string, bool, bool) {
+	trimmed := strings.TrimSpace(line)
+
+	if trimmed == ".text" {
+		return "", true, true
+	}
+
+	if !strings.HasPrefix(trimmed, ".section") {
+		return "", false, false
+	}
+
+	fields := strings.Fields(trimmed)
+	if len(fields) < 2 {
+		return "", false, true
+	}
+
+	operands := strings.Split(fields[1], ",")
+	name := operands[0]
+
+	// A stack-sizes block belongs to the section named in its fourth operand.
+	// It refers to that function's own labels, so it has to go when the
+	// function goes.
+	if name == ".stack_sizes" && len(operands) >= 4 {
+		name = operands[3]
+	}
+
+	if name == ".text" {
+		return "", true, true
+	}
+	if strings.HasPrefix(name, ".text.") {
+		// The lexer's identifier pattern allows one leading dot and no others,
+		// so ".text.stdlib.stdio.f" arrives as four tokens and the parser keeps
+		// only the last as the section's name. Two sections whose names differ
+		// only in an earlier component therefore share one section here, which
+		// is how the linker already behaves; for liveness it only ever keeps
+		// more, never less.
+		return name[strings.LastIndex(name, ".")+1:], true, true
+	}
+
+	return name, false, true
 }
 
 func (this *Executable) DumpAddresses(path string) {

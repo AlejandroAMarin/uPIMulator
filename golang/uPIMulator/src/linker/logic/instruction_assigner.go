@@ -2,6 +2,7 @@ package logic
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"uPIMulator/src/linker/kernel"
 	"uPIMulator/src/linker/kernel/directive"
@@ -2471,7 +2472,7 @@ func (this *InstructionAssigner) EvaluateIdentifier(token *lexer.Token) int64 {
 	} else if linker_constant != nil {
 		return linker_constant.Value()
 	} else {
-		err := errors.New("label and linker constant do not exist")
+		err := fmt.Errorf("no label and no linker constant named %q", name)
 		panic(err)
 	}
 }

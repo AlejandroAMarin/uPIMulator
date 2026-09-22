@@ -238,9 +238,9 @@ Errors against the hardware, over 1 to 16 tasklets:
 
 | workload | error |
 |---|---|
-| histogram | -0.03% to -0.13% |
-| BIMSA | +1.21% to +2.16% |
-| vector addition | +0.33% to +2.19% |
+| histogram | -0.04% to -0.09% |
+| BIMSA | +1.48% to +2.12% |
+| vector addition | +0.07% to +2.23% |
 
 Instruction counts are exact at one tasklet on both new kernels.
 
@@ -264,17 +264,67 @@ answers quietly:
   BIMSA's time and the hardware repeats to only about 1%. A single reading made
   one point look 1.8% out where the median says 0.3%.
 
+## 2026-09-22 — The linker keeps only the code something reaches
+
+The simulator could not run a program the machine runs.
+
+uPIMulator linked whole object files: needing any function from a file brought
+in every function in it. The compiler puts each function in its own piece and
+the machine's linker throws away the pieces nobody calls. BIMSA's gap-affine
+kernel is 3795 instructions on the machine; here it was 6522, and the
+instruction memory holds 4096. It simply would not load.
+
+The linker now applies the same rule the machine's does: keep a piece of code
+if it is the entry point, or if something that is kept names it. The affine
+kernel now links at 4062 instructions.
+
+Three details had to be right, and each cost a round of debugging:
+
+- A list the compiler emits of every function whose address is taken anywhere
+  must not count as a reference, or nothing is ever dropped.
+- A function referring to its own labels says nothing about whether anything
+  needs it. Every function has an "end of function" label and names it in its
+  own size directive; counting those kept the first function alive from every
+  other one.
+- The small blocks recording each function's stack use belong to that function
+  and name its labels, so they have to go when it goes.
+
+**The check that this is safe is that it cannot change a program that already
+fitted.** PrIM's vector addition gives the same cycle and instruction counts
+either way, to the digit.
+
+### Metadata was taking up memory it does not take on the machine
+
+Found while checking the above, and worth more than it sounds.
+
+Those stack-use blocks, and debug information, are notes for tools. The machine
+never loads them. uPIMulator was putting them at the bottom of main memory,
+ahead of the program's own data, which cost BIMSA 104 bytes and put the start
+of its heap 104 bytes past where the machine puts it.
+
+Because the memory system charges by which 1 KB row a transfer falls in, a
+shift of the heap changes what every transfer costs: a 16-byte shift was
+measured to move BIMSA's time by 0.32%. The heap now starts at exactly the
+address the machine's own linker reports. PrIM's vector addition improved from
++0.44% to +0.26% at one tasklet, and from +0.33% to +0.07% at two.
+
+**Before trusting a new workload, check the two heaps agree.** They are printed
+by the machine's object dumper and by the linker's own output.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.
 
 | tasklets | first measurement | after the memory fit | now |
 |---|---|---|---|
-| 1 | -4.86% | +0.61% | +2.10% |
-| 2 | -4.93% | +0.44% | +2.16% |
-| 4 | -5.29% | -0.93% | +1.51% |
-| 8 | +1.68% | +2.89% | +1.21% |
-| 16 | +2.54% | +3.51% | +1.35% |
+| 1 | -4.86% | +0.61% | +2.08% |
+| 2 | -4.93% | +0.44% | +2.12% |
+| 4 | -5.29% | -0.93% | +1.77% |
+| 8 | +1.68% | +2.89% | +1.67% |
+| 16 | +2.54% | +3.51% | +1.48% |
+
+The other two workloads, over the same range of tasklets: PrIM's vector
+addition +0.07% to +2.23%, PrIM's histogram -0.04% to -0.09%.
 
 Instruction counts match the hardware exactly at 1 tasklet and within 0.12% at
 16. Host transfers are 4% under. Hardware repeats itself to 0.04%, so every
