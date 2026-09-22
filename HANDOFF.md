@@ -380,6 +380,109 @@ understood:
   BIMSA's standard and the hardware repeats to only about 1%. One reading made
   `va` at 2 tasklets look 1.78% out when the median says 0.33%.
 
+### GIMSA runs, and computes what the machine computes
+
+The second application. Asian rice, 199 DPUs, 12 tasklets, 2000 queries:
+**100% accuracy on both sides, 2000 of 2000, against the project's own
+unbounded oracle.**
+
+    cd gimsa && ./bin/gimsa_kernel_lut.exe -r dataset/asian_rice.fa \
+        -q <queries> -k 22 -c 16384 -l 16 -d 202 -m 1536 -b 2000 -t 4 -u 8
+
+Three things had to be built first, and each is a commit of its own: the linker
+had to drop unreachable code or the kernel would not fit IRAM; `ExecuteSErri`
+had to exist or the kernel could not run; and host transfers had to move a row
+at a time or a run spent a quarter of an hour before the kernel started.
+
+Four things to know before running it:
+
+- **A query file holds three lines per query, not one.** The second header line
+  says how many. Truncating at one line per query leaves the first third intact
+  and the rest garbage, which is exactly what it looks like: 666 of 2000
+  correct. The host says `PIM accuracy 33.3` and nothing else goes wrong.
+- **A truncated query set needs its own ground truth**, or the host skips
+  verification and says so in one line that is easy to miss. Slice it out of
+  the full file's oracle: 64-byte header, the count is the int64 at offset 24,
+  and offset 16 is K.
+- **`SUBLUT_BITS` must match the dataset**, which is 8 for asian rice K22. The
+  host refuses to start when its own build and `-u` disagree, but nothing
+  checks the DPU kernel you linked against it.
+- **199 DPUs is the floor** for this dataset; it is partitioned across that many
+  and precompute decides it. Expect about 38 GB of host memory.
+
+A run takes about three minutes of wall time for 2000 queries.
+
+### GIMSA's timing, per phase
+
+`gimsa_phases_profile_*_phase_profile_cycles.exe` reports the DPU cycles each
+phase costs per query. The same binary, the same queries, on the machine and on
+the simulator:
+
+| per query | hardware | uPIMulator | error |
+|---|---|---|---|
+| `AVG_bs_steps` | 10.613750 | 10.613750 | exact |
+| `AVG_consult` (LUT) | 1121.396 | 1124.164 | +0.25% |
+| `AVG_bs` (binary search) | 5227.100 | 5039.552 | **-3.59%** |
+
+Both runs verify at 100%, 2000 of 2000.
+
+The step count is exactly equal, so the simulator does the same searching. The
+cost of a step is what differs: 187.5 cycles over 10.61 steps, about 17.7
+cycles a step, and each step is one 8-byte read at a random place in a 57 MB
+table.
+
+**This is the second workload to say the same thing.** BIMSA's `extend` is
+3.18% fast and its reads are small; GIMSA's binary search is 3.59% fast and its
+reads are small and scattered. Two unrelated kernels, the same sign and nearly
+the same size. Raising `dma_startup_cycles` closes `extend` but over-charges
+BIMSA's `rings` and `overlap`, which stream, so the missing cost is not a flat
+per-transfer charge. A charge that grows when consecutive reads land on
+different rows would fit all four measurements; nothing has tested that yet.
+
+    # both sides, once the query file and its oracle are in place
+    UPIM_STATS=<file> runner/upimulator run --program-dir <bin> \
+        --tasklets 12 --dpus 199 -- \
+        ./bin/gimsa_phases_profile_kernel_lut_phase_profile_cycles.exe \
+        -r dataset/asian_rice.fa -q <queries> -k 22 -c 16384 -l 16 \
+        -d 202 -m 1536 -b 2000 -t 4 -u 8
+
+### The linker keeps only what the program reaches, data as well as code
+
+The pruner used to treat every section that is not code as a root. A `.rodata`
+jump table is not code, so it kept its own function alive, and that function
+kept everything it calls alive. `printf` survived in GIMSA, which never calls
+it, and with `printf` came the SDK's 1 MB stdout buffer in `.mram.noinit`.
+
+The machine's linker drops both. GIMSA's own kernel binary has
+`.mram.noinit = 0x408000` and the simulator had `0x508000`: **the MRAM heap
+started 1 MB higher than on the machine, for every program that does not use
+`printf`.** For GIMSA's profiling build that 1 MB was the difference between
+fitting MRAM and reading past its end.
+
+Now both agree exactly. BIMSA does call `printf`, so it keeps the buffer on
+both sides -- but it also had 208 bytes of its own unreachable `.mram.noinit`,
+which the machine drops and this used to keep. Its heap now starts on the
+1 MB boundary the machine puts it on.
+
+Two things this brought out, both worth keeping in mind:
+
+- **A data section belongs to one object file.** `.mram.noinit` is one output
+  section built from a piece of every object that puts something there. Naming
+  the pieces alike makes one live piece keep every other alive, and nothing is
+  ever dropped.
+- **The stacks were never aligned.** `AssignWram` placed `.data.stacks` wherever
+  the section in front of it ended. Nothing had noticed, because the sections in
+  front happened to add up to a multiple of 8 -- until 188 bytes of dropped jump
+  table moved the stacks onto a 4-byte boundary. A DMA moves 8 bytes at a time,
+  so the last word of every transfer out of a local array was lost.
+  `runner/tests/alu` caught it in one result out of 1224. The machine pads
+  `.data.stacks` for the same reason; it does so now too.
+
+`.data` and `.bss` are still roots. The machine drops those as well, and the
+simulator carries about 530 bytes of WRAM that the machine does not, but
+nothing measured depends on it and a data object that only the host reads would
+go with it.
+
 ### What is left
 
 1. **`extend` in BIMSA's gap-affine aligner, 3.18% fast**, of which about 40%
@@ -410,7 +513,10 @@ understood:
    measured.
 6. Transfers as simulated traffic rather than an analytic charge. Only needed
    for a study where transfers overlap a kernel; they do not here.
-7. GIMSA.
+7. The cost of a scattered MRAM read. GIMSA's binary search and BIMSA's
+   `extend` are both about 3.5% fast, and a flat per-transfer charge cannot fix
+   both without breaking the streaming kernels. Test a charge that depends on
+   whether consecutive reads share a row.
 
 `PERF_TIER=1` needs a gap-affine build, not an edit-distance one: every tier-1
 and tier-2 probe sits in the gap-affine path, so edit distance reports no calls

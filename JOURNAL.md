@@ -311,7 +311,7 @@ address the machine's own linker reports. PrIM's vector addition improved from
 **Before trusting a new workload, check the two heaps agree.** They are printed
 by the machine's object dumper and by the linker's own output.
 
-## 2026-09-22 — GIMSA reaches the simulator
+## 2026-09-22 — GIMSA runs, and computes what the machine computes
 
 The second application. Three gates, all of which could have blocked it, and
 none of which did for long:
@@ -331,10 +331,82 @@ A reference run on the machine works: 199 DPUs, 2000 queries of the rice
 dataset, 28.8 ms of which 13.9 ms is the kernel. The encoded query files are
 plain text with a three-line header, so any smaller query set is one command.
 
-**One thing to fix before any number counts**: a truncated query file has no
-ground truth, so the host skips its own verification. GIMSA checks its results
-against a stored oracle and says so; a timing comparison against an unverified
-run is worth nothing. Generate the oracle first.
+**The result.** 199 DPUs, 2000 queries of the rice dataset: the simulator
+produces exactly the intervals the machine produces, 2000 of 2000, checked
+against the project's own oracle. A second application runs correctly.
+
+Two further problems had to be solved to get there, and both are worth knowing:
+
+- **Moving the data was the slow part, not simulating it.** The database is 57
+  MB per DPU and the simulator copied it a byte at a time, cloning each 1 KB
+  row before overwriting it. The transfer phase alone ran past thirteen
+  minutes. Copying a row at a time brought the whole run to three.
+- **A query file holds three lines per query, not one.** Truncating it at one
+  line per query leaves the first third intact and the rest nonsense. The first
+  run I did that way reported 33.3% accuracy -- exactly the intact third -- and
+  a kernel time twelve times too large, because it was searching on rubbish.
+  The number looked plausible. Only the verification gate showed it was not.
+
+**That second one is the lesson of the day.** A timing measurement from a run
+that was not checked for correctness is not merely uncertain. It can be wrong
+by a factor of twelve and still look like a reasonable answer.
+
+## 2026-09-22 — The linker keeps only the data something reaches
+
+Found while trying to measure GIMSA. Its profiling build read past the end of
+memory and stopped.
+
+The linker throws away code nothing calls. It did not throw away data. A jump
+table is data, so it counted as something the program needs, and it kept its
+own function alive, and that function kept everything it calls alive. That is
+how `printf` survived in a program that never prints -- and with `printf` came
+the SDK's one-megabyte output buffer.
+
+**Every program that does not print was therefore starting its memory one
+megabyte higher than on the machine.** GIMSA's profiling build needed that
+megabyte and did not have it.
+
+The linker now applies the same rule to data as to code. GIMSA's memory layout
+is now byte for byte the machine's. BIMSA does print, so it keeps the buffer on
+both sides, but it also carried 208 bytes of its own unused data that the
+machine drops; its memory now starts on the same boundary too. Its cycle counts
+are unchanged, to the digit.
+
+Two things came out of it:
+
+- A piece of data belongs to the file it is written in. One area of memory is
+  built from a piece of every file that puts something there, and each piece
+  has to be judged on its own, or one live piece keeps all the dead ones.
+- **The stacks were never aligned.** They were placed wherever the section in
+  front of them ended. Nothing had noticed, because the sections in front
+  always happened to end on the right boundary -- until 188 bytes of dropped
+  jump table moved them four bytes off it. Memory transfers move eight bytes at
+  a time, so the last word of every transfer out of a local array was lost. The
+  arithmetic test suite caught it in one result out of 1224. The machine pads
+  for this reason; the simulator now does too.
+
+## 2026-09-22 — GIMSA's timing, per phase
+
+GIMSA reports the work each phase of a query costs. The same binary, the same
+queries, both sides verified at 100%:
+
+| per query | hardware | uPIMulator | error |
+|---|---|---|---|
+| search steps | 10.613750 | 10.613750 | exact |
+| table lookup | 1121.4 | 1124.2 | +0.25% |
+| binary search | 5227.1 | 5039.6 | **-3.59%** |
+
+The step count is exactly equal, so the simulator searches the same way. What
+differs is the cost of a step: about 17.7 cycles each, and each step is one
+small read at a random place in a 57 MB table.
+
+**This is the second workload to say the same thing.** BIMSA's alignment
+extension is 3.18% fast and its reads are small. GIMSA's binary search is 3.59%
+fast and its reads are small and scattered. Two unrelated programs, the same
+sign and nearly the same size. A flat charge per transfer fixes one and breaks
+the programs that read in long runs, so that is not what is missing. Something
+that costs more when consecutive reads land far apart would fit all of it. That
+is the next thing to test.
 
 ## Accuracy, then and now
 
@@ -374,6 +446,7 @@ number above is a real difference and not noise.
 3. The flat 1.6% left in memory throughput, which the model cannot express
    exactly because its timing constants are whole cycles. The three workloads
    now agree this is the only error left that is large enough to see.
-4. GIMSA: the first hardware-against-simulator measurement. It runs on both
-   sides now; what is left is the ground truth for a small query set and the
-   comparison itself.
+4. The cost of a small read at a random address. Two programs now say the
+   simulator is about 3.5% cheap there, and the fix for one breaks the others.
+   A charge that depends on how far apart consecutive reads land would fit
+   every measurement taken so far.
