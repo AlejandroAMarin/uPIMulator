@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define NCASES 11
+#define NCASES 17
 
 static const char *const NAMES[NCASES] = {
     "add r4,r4,r5   read e+o",   "add r4,r6,r8   read e+e",
@@ -15,6 +15,9 @@ static const char *const NAMES[NCASES] = {
     "add r4,r6,1    read e, write other e", "sub r10,r6,r8  read e+e, write third e",
     "add r5,r7,r9   three odd", "add r6,r7,r9   read o+o, write e",
     "add r5,r6,r7   read e+o, write o",
+    "lw  r4,r6,0    32-bit load", "ld  d4,r6,0    64-bit load",
+    "ld  d8,r6,0    64-bit load, other pair", "sw  r6,0,r4    32-bit store",
+    "sd  r6,0,d4    64-bit store", "lsl_add r4,r6,r8  three even",
 };
 
 int main(void)

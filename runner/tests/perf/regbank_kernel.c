@@ -21,13 +21,46 @@
 
 BARRIER_INIT(rb_barrier, NR_TASKLETS);
 
-#define NCASES 11
+#define NCASES 17
 
 __host uint32_t LOOPS;
+
+/* A WRAM buffer for the load and store cases. Eight-byte aligned, because a
+ * 64-bit ld or sd needs that. */
+__dma_aligned uint64_t scratch[8];
 __host uint32_t OUT_CYCLES[NCASES];
 __host uint32_t OUT_INSTR[NCASES];
 
 #define X8(s) s s s s s s s s
+
+/* RUNP is RUN with a pointer put in r6 first, for the cases that touch WRAM.
+ * The extra move is one instruction of the nine in an iteration and it is the
+ * same on both sides, so it cancels. */
+#define RUNP(k, BODY, ...)                                                     \
+    do {                                                                       \
+        if (me_ == 0) perfcounter_config(COUNT_CYCLES, true);                  \
+        barrier_wait(&rb_barrier);                                             \
+        a = perfcounter_get();                                                 \
+        for (i = 0; i < n; i++)                                                \
+            __asm__ volatile("move r6, %[p]\n\t" X8(BODY)                      \
+                             :                                                 \
+                             : [p] "r"(scratch)                                \
+                             : "r6", __VA_ARGS__);                             \
+        b = perfcounter_get();                                                 \
+        if (me_ == 0) OUT_CYCLES[k] = (uint32_t)(b - a);                       \
+        barrier_wait(&rb_barrier);                                             \
+        if (me_ == 0) perfcounter_config(COUNT_INSTRUCTIONS, true);            \
+        barrier_wait(&rb_barrier);                                             \
+        a = perfcounter_get();                                                 \
+        for (i = 0; i < n; i++)                                                \
+            __asm__ volatile("move r6, %[p]\n\t" X8(BODY)                      \
+                             :                                                 \
+                             : [p] "r"(scratch)                                \
+                             : "r6", __VA_ARGS__);                             \
+        b = perfcounter_get();                                                 \
+        if (me_ == 0) OUT_INSTR[k] = (uint32_t)(b - a);                        \
+        barrier_wait(&rb_barrier);                                             \
+    } while (0)
 
 /* run(k, body): time the body and record it, then count its instructions.
  * Tasklet 0 owns the counter, and a barrier keeps every tasklet inside the
@@ -79,6 +112,17 @@ int main(void)
     RUN(9, "add r6, r7, r9\n\t", "r6", "r7", "r9");
     /* one odd read, one even read, odd write */
     RUN(10, "add r5, r6, r7\n\t", "r5", "r6", "r7");
+
+    /* The forms BIMSA's extend phase is built from, which the cases above do
+     * not cover: WRAM loads and stores, 64-bit pairs, and the shift-and-add.
+     * A 64-bit ld or sd touches four registers where a 32-bit one touches two,
+     * and nothing had ever checked what the machine charges for that. */
+    RUNP(11, "lw r4, r6, 0\n\t", "r4");
+    RUNP(12, "ld d4, r6, 0\n\t", "r4", "r5");
+    RUNP(13, "ld d8, r6, 0\n\t", "r8", "r9");
+    RUNP(14, "sw r6, 0, r4\n\t", "r4");
+    RUNP(15, "sd r6, 0, d4\n\t", "r4", "r5");
+    RUN(16, "lsl_add r4, r6, r8, 2\n\t", "r4", "r6", "r8");
 
     return 0;
 }

@@ -178,6 +178,23 @@ lost slot per iteration out of nine instructions away, and both involve the
 boundary between the loop's own instruction and the next: a rule that looks at
 one instruction at a time cannot express that.
 
+Six more cases cover the forms BIMSA's `extend` phase is built from, which the
+`add` forms above do not reach. A 64-bit `ld` or `sd` touches four registers
+where a 32-bit one touches two, so it was the obvious suspect when `extend`
+turned out to be the worst section in the kernel. It is not:
+
+| instruction | hardware | uPIMulator |
+|---|---|---|
+| `lw r4, r6, 0` | 11.03 | 11.01 |
+| `ld d4, r6, 0` | 11.03 | 11.01 |
+| `ld d8, r6, 0` | 11.03 | 11.01 |
+| `sw r6, 0, r4` | 11.03 | 11.01 |
+| `sd r6, 0, d4` | 11.03 | 11.01 |
+| `lsl_add r4, r6, r8, 2` | 20.81 | 20.78 |
+
+The machine charges nothing extra for a 64-bit pair, and charges `lsl_add` the
+same as any other three-register instruction. Everything agrees within 0.22%.
+
 **The old rule was wrong twice over.** It counted this instruction's sources
 together with the register the instruction *before* it wrote, and charged
 `floor(even/2) + floor(odd/2)`. That fires on pairs the machine serves for
