@@ -27,6 +27,14 @@ __host uint32_t LBU[NMEM], LBS[NMEM], LHU[NMEM], LHS[NMEM];
 __host uint32_t EXTSB[NMEM], EXTSH[NMEM], EXTUB[NMEM], EXTUH[NMEM];
 __host uint32_t SBSH[NMEM];
 
+/* The same narrow loads, widened to 64 bits in one instruction. The assembler
+ * writes these "lbu.u d2, r0, 20"; they are the S_ERRI and U_ERRI forms. GIMSA
+ * uses them and BIMSA does not, which is how they stayed unimplemented until
+ * GIMSA stopped the simulator on one. Two words per result, low first. */
+__host uint32_t LBU64[NMEM * 2], LBS64[NMEM * 2];
+__host uint32_t LHU64[NMEM * 2], LHS64[NMEM * 2];
+__host uint32_t LWU64[NMEM * 2], LWS64[NMEM * 2];
+
 /* An MRAM round trip, which is how BIMSA moves sequences. */
 __host uint32_t MRAM_OUT[NMEM];
 __mram_noinit uint8_t scratch[2048];
@@ -132,6 +140,15 @@ int main(void)
         pb[3] = (uint8_t)MEMIN[i];
         ph[0] = (uint16_t)(MEMIN[i] >> 8);
         SBSH[i] = packed;
+
+        /* Widened in one instruction, not loaded and then extended. */
+        volatile uint64_t u;
+        u = (uint64_t)bp[0];                       LBU64[2*i] = (uint32_t)u; LBU64[2*i+1] = (uint32_t)(u >> 32);
+        u = (uint64_t)(int64_t)sbp[0];             LBS64[2*i] = (uint32_t)u; LBS64[2*i+1] = (uint32_t)(u >> 32);
+        u = (uint64_t)hp[0];                       LHU64[2*i] = (uint32_t)u; LHU64[2*i+1] = (uint32_t)(u >> 32);
+        u = (uint64_t)(int64_t)shp[0];             LHS64[2*i] = (uint32_t)u; LHS64[2*i+1] = (uint32_t)(u >> 32);
+        u = (uint64_t)cell;                        LWU64[2*i] = (uint32_t)u; LWU64[2*i+1] = (uint32_t)(u >> 32);
+        u = (uint64_t)(int64_t)(int32_t)cell;      LWS64[2*i] = (uint32_t)u; LWS64[2*i+1] = (uint32_t)(u >> 32);
     }
 
     /* MRAM round trip: write the table out and read it back. */

@@ -38,6 +38,7 @@ int main(void)
     uint32_t lbu[NMEM], lbs[NMEM], lhu[NMEM], lhs[NMEM];
     uint32_t esb[NMEM], esh[NMEM], eub[NMEM], euh[NMEM], sbsh[NMEM];
     uint32_t mramo[NMEM];
+    uint32_t w64[6][NMEM * 2];
 
     const char *bin = getenv("COND_DPU_BIN");
     if (bin == NULL) bin = "/tmp/cond_dpu";
@@ -66,6 +67,12 @@ int main(void)
         DPU_ASSERT(dpu_copy_from(dpu, "EXTUH", 0, euh, sizeof(euh)));
         DPU_ASSERT(dpu_copy_from(dpu, "SBSH", 0, sbsh, sizeof(sbsh)));
         DPU_ASSERT(dpu_copy_from(dpu, "MRAM_OUT", 0, mramo, sizeof(mramo)));
+        DPU_ASSERT(dpu_copy_from(dpu, "LBU64", 0, w64[0], sizeof(w64[0])));
+        DPU_ASSERT(dpu_copy_from(dpu, "LBS64", 0, w64[1], sizeof(w64[1])));
+        DPU_ASSERT(dpu_copy_from(dpu, "LHU64", 0, w64[2], sizeof(w64[2])));
+        DPU_ASSERT(dpu_copy_from(dpu, "LHS64", 0, w64[3], sizeof(w64[3])));
+        DPU_ASSERT(dpu_copy_from(dpu, "LWU64", 0, w64[4], sizeof(w64[4])));
+        DPU_ASSERT(dpu_copy_from(dpu, "LWS64", 0, w64[5], sizeof(w64[5])));
     }
 
     for (int c = 0; c < NSUB; c++)
@@ -77,6 +84,15 @@ int main(void)
         for (int i = 0; i < NPAIR; i++)
             printf("add.%-4s 0x%08x 0x%08x -> %u\n", ADD_NAME[c], A[i], B[i],
                    addc[c * NPAIR + i]);
+
+    {
+        static const char *const W64_NAME[6] = {"lbu.u", "lbs.s", "lhu.u",
+                                                "lhs.s", "lw.u", "lw.s"};
+        for (int c = 0; c < 6; c++)
+            for (int i = 0; i < NMEM; i++)
+                printf("wide.%-5s 0x%08x -> 0x%08x%08x\n", W64_NAME[c], MEM[i],
+                       w64[c][2 * i + 1], w64[c][2 * i]);
+    }
 
     for (int i = 0; i < NMEM; i++)
         printf("mem 0x%08x lbu=0x%08x lbs=0x%08x lhu=0x%08x lhs=0x%08x "

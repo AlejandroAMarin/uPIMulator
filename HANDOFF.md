@@ -28,7 +28,7 @@ operation served by simulation. That part works. BIMSA first, GIMSA next.
 
 Double-precision arithmetic was wrong, which made BIMSA's own MRAM guard reject
 its workload. Chasing it found ten more defects in the same layers. All are
-fixed, and `runner/tests/alu/run.sh` holds them fixed by diffing 1176 results
+fixed, and `runner/tests/alu/run.sh` holds them fixed by diffing 1224 results
 against UPMEM's own functional simulator.
 
 | Defect | Effect |
@@ -44,6 +44,7 @@ against UPMEM's own functional simulator.
 | `pl`/`mi` tested the unsigned image of the result, so `mi` could never be set | every negative result looked positive |
 | `ExecuteAddRrrci`/`ExecuteAddZrrci` discarded the ALU's overflow | `ov`/`nov` never fired after an add |
 | `lsl1x`, `lsr1x` and `ExecuteSRrr` were not implemented | panic on use |
+| `ExecuteSErri` was not implemented | panic on use. A narrow load widened to 64 bits in one instruction, written `lbu.u d2, r0, 20`. GIMSA stopped the simulator on one; BIMSA never emits it |
 
 **None of the 13 PrIM benchmarks uses double precision**, and PrIM never hits an
 unaligned DMA either, so uPIMulator's published validation never exercised any

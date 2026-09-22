@@ -311,6 +311,31 @@ address the machine's own linker reports. PrIM's vector addition improved from
 **Before trusting a new workload, check the two heaps agree.** They are printed
 by the machine's object dumper and by the linker's own output.
 
+## 2026-09-22 — GIMSA reaches the simulator
+
+The second application. Three gates, all of which could have blocked it, and
+none of which did for long:
+
+- **The shim already covers it.** All thirty GIMSA host programs use the same
+  thirteen library calls, every one of them already implemented. No new work.
+- **The kernel links.** 959 instructions against the machine's own 694, well
+  inside the 4096 the hardware holds. It would not have fitted before the
+  linker learned to drop unreachable code.
+- **One instruction was missing.** GIMSA stopped the simulator on a narrow load
+  widened to 64 bits in a single instruction, which BIMSA never emits. It is
+  implemented now and checked the same way as the other eleven: against UPMEM's
+  own simulator, 48 new cases, all matching. The conformance suite is 1224
+  results.
+
+A reference run on the machine works: 199 DPUs, 2000 queries of the rice
+dataset, 28.8 ms of which 13.9 ms is the kernel. The encoded query files are
+plain text with a three-line header, so any smaller query set is one command.
+
+**One thing to fix before any number counts**: a truncated query file has no
+ground truth, so the host skips its own verification. GIMSA checks its results
+against a stored oracle and says so; a timing comparison against an unverified
+run is worth nothing. Generate the oracle first.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.
@@ -334,7 +359,7 @@ number above is a real difference and not noise.
 
 | Directory | What it holds |
 |---|---|
-| `runner/tests/alu` | 1176 arithmetic and condition results, against UPMEM's own simulator |
+| `runner/tests/alu` | 1224 arithmetic, condition and load results, against UPMEM's own simulator |
 | `runner/tests/fp` | The double-precision case that started all of it |
 | `runner/tests/perf` | The hardware-against-simulator measurements and the fits behind them: whole-program, memory latency, memory under contention, register banks, host transfers |
 | `runner/tests/prim` | Two of PrIM's own kernels against the hardware, as a check that the model holds beyond BIMSA |
@@ -349,4 +374,6 @@ number above is a real difference and not noise.
 3. The flat 1.6% left in memory throughput, which the model cannot express
    exactly because its timing constants are whole cycles. The three workloads
    now agree this is the only error left that is large enough to see.
-4. GIMSA.
+4. GIMSA: the first hardware-against-simulator measurement. It runs on both
+   sides now; what is left is the ground truth for a small query set and the
+   comparison itself.

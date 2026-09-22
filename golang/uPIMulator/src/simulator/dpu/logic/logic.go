@@ -5075,9 +5075,59 @@ func (this *Logic) ExecuteErri(instruction_ *instruction.Instruction) {
 	thread.RegFile().IncrementPcReg()
 }
 
+// ExecuteSErri is a narrow load whose destination is a register pair: the byte,
+// half or word is read as ExecuteErri reads it, then widened to 64 bits, with
+// the sign for S_ERRI and with zeroes for U_ERRI. The assembler writes it
+// "lbu.u d2, r0, 20".
+//
+// GIMSA needs it and BIMSA never did, which is why it sat unimplemented. The
+// wider 64-bit load, ld, is a different form (EDRI) and was already here.
 func (this *Logic) ExecuteSErri(instruction_ *instruction.Instruction) {
-	err := errors.New("ExecuteSErri is not yet implemented")
-	panic(err)
+	if _, found := instruction_.ErriOpCodes()[instruction_.OpCode()]; !found {
+		err := errors.New("op code is not a valid ERRI op code")
+		panic(err)
+	} else if instruction_.Suffix() != instruction.S_ERRI &&
+		instruction_.Suffix() != instruction.U_ERRI {
+		err := errors.New("suffix is not S_ERRI nor U_ERRI")
+		panic(err)
+	}
+
+	thread := this.scoreboard[instruction_]
+
+	ra := thread.RegFile().ReadSrcReg(instruction_.Ra(), word.SIGNED)
+	off := instruction_.Off().Value()
+
+	address, _, _ := this.alu.Add(ra, off)
+
+	var result int64
+
+	op_code := instruction_.OpCode()
+	if op_code == instruction.LBS {
+		result = this.operand_collector.Lbs(address)
+	} else if op_code == instruction.LBU {
+		result = this.operand_collector.Lbu(address)
+	} else if op_code == instruction.LHS {
+		result = this.operand_collector.Lhs(address)
+	} else if op_code == instruction.LHU {
+		result = this.operand_collector.Lhu(address)
+	} else if op_code == instruction.LW {
+		result = this.operand_collector.Lw(address)
+	} else {
+		err := errors.New("op code is not valid")
+		panic(err)
+	}
+
+	var even int64
+	var odd int64
+	if instruction_.Suffix() == instruction.S_ERRI {
+		even, odd = this.alu.SignedExtension(result)
+	} else {
+		even, odd = this.alu.UnsignedExtension(result)
+	}
+
+	thread.RegFile().ClearConditions()
+	thread.RegFile().WritePairReg(instruction_.Dc(), even, odd)
+	thread.RegFile().IncrementPcReg()
 }
 
 func (this *Logic) ExecuteEdri(instruction_ *instruction.Instruction) {
