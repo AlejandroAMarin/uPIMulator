@@ -50,7 +50,26 @@ func (this *Wordline) Write(byte_stream *encoding.ByteStream) {
 		panic(err)
 	}
 
-	for i := int64(0); i < byte_stream.Size(); i++ {
-		this.byte_stream.Set(int(i), byte_stream.Get(int(i)))
-	}
+	this.byte_stream.CopyFrom(0, byte_stream, 0, byte_stream.Size())
+}
+
+// WriteRange puts n bytes of src into this row at offset, without reading the
+// row first. ReadRange is its opposite. Together they let a host transfer move
+// a wordline at a time instead of a byte at a time.
+func (this *Wordline) WriteRange(
+	offset int64,
+	src *encoding.ByteStream,
+	src_offset int64,
+	n int64,
+) {
+	this.byte_stream.CopyFrom(offset, src, src_offset, n)
+}
+
+func (this *Wordline) ReadRange(
+	offset int64,
+	dst *encoding.ByteStream,
+	dst_offset int64,
+	n int64,
+) {
+	dst.CopyFrom(dst_offset, this.byte_stream, offset, n)
 }

@@ -151,22 +151,26 @@ func (this *MemoryController) Front() *DmaCommand {
 	return dma_command
 }
 
+// Read and Write move a host transfer's bytes a row at a time. They used to do
+// it a byte at a time, through a clone of each row, which is invisible on a
+// kernel's own transfers and dominates everything when a host pushes a database
+// in: GIMSA sends 57 MB to each of 199 DPUs. Neither charges any cycles -- the
+// cost of a host transfer is charged in api.TransferCycles -- so this is only
+// about how long the simulation takes to run, not what it reports.
 func (this *MemoryController) Read(address int64, size int64) *encoding.ByteStream {
 	byte_stream := new(encoding.ByteStream)
-	byte_stream.Init()
+	byte_stream.InitSize(size)
 
+	offset := int64(0)
 	for cur_address := address; cur_address < address+size; {
 		cur_wordline_address := this.WordlineAddress(cur_address)
 		cur_size := this.Min(cur_wordline_address+this.wordline_size, address+size) - cur_address
 		cur_offset := cur_address % this.wordline_size
 
-		mram_byte_stream := this.mram.Read(cur_wordline_address)
-
-		for i := cur_offset; i < cur_offset+cur_size; i++ {
-			byte_stream.Append(mram_byte_stream.Get(int(i)))
-		}
+		this.mram.ReadRange(cur_wordline_address, cur_offset, byte_stream, offset, cur_size)
 
 		cur_address += cur_size
+		offset += cur_size
 	}
 
 	return byte_stream
@@ -184,13 +188,13 @@ func (this *MemoryController) Write(address int64, size int64, byte_stream *enco
 		cur_size := this.Min(cur_wordline_address+this.wordline_size, address+size) - cur_address
 		cur_offset := cur_address % this.wordline_size
 
-		mram_byte_stream := this.mram.Read(cur_wordline_address)
-
-		for i := int64(0); i < cur_size; i++ {
-			mram_byte_stream.Set(int(i+cur_offset), byte_stream.Get(int(i+cur_byte_stream_offset)))
-		}
-
-		this.mram.Write(cur_wordline_address, mram_byte_stream)
+		this.mram.WriteRange(
+			cur_wordline_address,
+			cur_offset,
+			byte_stream,
+			cur_byte_stream_offset,
+			cur_size,
+		)
 
 		cur_address += cur_size
 		cur_byte_stream_offset += cur_size

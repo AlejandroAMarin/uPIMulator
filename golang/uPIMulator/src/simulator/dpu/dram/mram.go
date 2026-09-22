@@ -72,6 +72,37 @@ func (this *Mram) Write(address int64, byte_stream *encoding.ByteStream) {
 	this.Wordline(address).Write(byte_stream)
 }
 
+// WriteRange puts n bytes of src into the row holding address, at offset within
+// it. It does not read the row first, so a transfer that covers whole rows
+// never copies what it is about to overwrite.
+func (this *Mram) WriteRange(
+	address int64,
+	offset int64,
+	src *encoding.ByteStream,
+	src_offset int64,
+	n int64,
+) {
+	this.Wordline(address).WriteRange(offset, src, src_offset, n)
+}
+
+// ReadRange takes n bytes out of the row holding address. A row that was never
+// written reads as zero, and dst arrives zeroed, so there is nothing to do.
+func (this *Mram) ReadRange(
+	address int64,
+	offset int64,
+	dst *encoding.ByteStream,
+	dst_offset int64,
+	n int64,
+) {
+	wordline, found := this.wordlines[this.Index(address)]
+
+	if !found {
+		return
+	}
+
+	wordline.ReadRange(offset, dst, dst_offset, n)
+}
+
 // Wordline returns the row holding address, creating it on first write.
 func (this *Mram) Wordline(address int64) *Wordline {
 	index := this.Index(address)

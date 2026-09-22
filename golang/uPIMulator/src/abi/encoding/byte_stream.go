@@ -17,6 +17,22 @@ func (this *ByteStream) InitSize(size int64) {
 	this.bytes = make([]uint8, size)
 }
 
+// CopyFrom copies n bytes from src, starting at src_offset, into this stream at
+// dst_offset.
+//
+// A byte at a time through Get and Set costs two method calls each. That is
+// invisible on a kernel's own loads and stores, which move a few bytes, and it
+// dominates everything when a host pushes a database into MRAM: GIMSA sends
+// 57 MB to each of 199 DPUs.
+func (this *ByteStream) CopyFrom(
+	dst_offset int64,
+	src *ByteStream,
+	src_offset int64,
+	n int64,
+) {
+	copy(this.bytes[dst_offset:dst_offset+n], src.bytes[src_offset:src_offset+n])
+}
+
 // Clone returns an independent copy.
 func (this *ByteStream) Clone() *ByteStream {
 	byte_stream := new(ByteStream)
