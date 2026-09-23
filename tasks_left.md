@@ -4,6 +4,32 @@ State: 2026-09-23. The validation study (M4) is done on four workloads.
 **M5, architecture exploration, is cancelled.** It needs a decision on what to
 explore before any code is written.
 
+## A run that works, for reference
+
+GIMSA, the largest workload validated. Both the machine and the simulator give
+the same answer for every query.
+
+| | |
+|---|---|
+| Dataset | *Oryza sativa* (asian rice), `dataset/asian_rice.fa`, 1.18 GB FASTA |
+| Index | `asian_rice_bitwise/pim_packed/K22_packed_lut12`, K = 22 |
+| DPUs | 199, one replica, 12 tasklets each |
+| Queries | 2000, length 66, 3 chunks each |
+| MRAM per DPU | 59,982,040 B of database -- 57.20 MiB, 89.4% full |
+| Result | 100% accuracy, 2000 of 2000, on both sides |
+| Wall time | about 3 minutes on the simulator |
+
+**199 DPUs is the floor.** The index is partitioned across exactly that many
+and precompute decides it. Expect about 38 GB of host memory.
+
+    cd gimsa && runner/upimulator run --program-dir <bin> --tasklets 12 --dpus 199 -- \
+        ./bin/gimsa_kernel_lut.exe -r dataset/asian_rice.fa -q <queries> \
+        -k 22 -c 16384 -l 16 -d 202 -m 1536 -b 2000 -t 4 -u 8
+
+Replace the kernel with `gimsa_phases_profile_kernel_lut_phase_profile_cycles.exe`
+for the per-phase cycle counts. `HANDOFF.md` lists the four traps in preparing
+the query file and the ground truth.
+
 ## Open work, in priority order
 
 1. **The cost of a scattered MRAM read.** The simulator is about 3.5% fast on
