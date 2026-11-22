@@ -9,6 +9,7 @@ import (
 	"uPIMulator/src/linker/kernel/instruction/cc"
 	"uPIMulator/src/linker/kernel/instruction/reg_descriptor"
 	"uPIMulator/src/misc"
+	"uPIMulator/src/simulator/dpu/dram"
 	"uPIMulator/src/simulator/dpu/sram"
 )
 
@@ -39,6 +40,9 @@ type Logic struct {
 	alu    *Alu
 	wait_q *InstructionQ
 
+	// Issue slots a thread spends when its MRAM read completes. See
+	// dma_resume_turns.
+	dma_resume_turns int64
 	// One performance counter per DPU, as on the hardware: a single register
 	// that all 24 threads share. perf_acc holds what earlier configurations
 	// contributed, perf_base the source's reading when the current one started.
@@ -83,6 +87,7 @@ func (this *Logic) Init(
 	this.perf_acc = 0
 
 	this.verbose = int(command_line_parser.IntParameter("verbose"))
+	this.dma_resume_turns = command_line_parser.IntParameter("dma_resume_turns")
 
 	this.thread_scheduler = nil
 	this.atomic = nil
@@ -283,6 +288,15 @@ func (this *Logic) ServiceDma() {
 				thread := this.scoreboard[instruction_]
 
 				this.thread_scheduler.Awake(thread.ThreadId())
+				// With dma_resume_turns, a thread whose read completes spends
+				// that many more issue slots before its next instruction. The
+				// default is 0: one slot was the model until 2026-10-02, and
+				// it stood in for the read's acknowledgement delay
+				// (dma_read_ack_cycles) and for refresh lock-in. See
+				// runner/tests/perf/refresh_kernel.c and stair_kernel.c.
+				if dma_command.MemoryOperation() == dram.READ {
+					thread.SetStallTurns(thread.StallTurns() + this.dma_resume_turns)
+				}
 
 				this.wait_q.Remove(i)
 				delete(this.scoreboard, instruction_)

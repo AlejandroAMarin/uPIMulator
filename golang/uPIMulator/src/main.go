@@ -194,6 +194,8 @@ func InitCommandLineParser() *misc.CommandLineParser {
 		"9",
 		"delay between the DMA engine finishing a write and the thread waking; the engine is free [logic cycle]",
 	)
+	command_line_parser.AddOption(misc.INT, "dma_read_ack_cycles", "9",
+		"cycles after the DMA engine is done with a read before its thread sees it; the engine is free meanwhile")
 	command_line_parser.AddOption(
 		misc.INT,
 		"dma_turnaround_cycles",
@@ -240,6 +242,12 @@ func InitCommandLineParser() *misc.CommandLineParser {
 		"cycles after a boot before the booted thread may issue (thread_policy 1)")
 	command_line_parser.AddOption(misc.INT, "resume_delay_cycles", "13",
 		"cycles after a resume before the resumed thread may issue (thread_policy 1)")
+	command_line_parser.AddOption(
+		misc.INT,
+		"dma_resume_turns",
+		"0",
+		"issue slots a thread spends when its MRAM read completes; writes spend none (1 before 2026-10-02)",
+	)
 	command_line_parser.AddOption(
 		misc.INT,
 		"dma_burst_size",

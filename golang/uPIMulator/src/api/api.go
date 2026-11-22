@@ -87,12 +87,20 @@ type Config struct {
 	// lowest-numbered thread's.
 	DmaPolicy int
 
+	// Issue slots a thread spends when its MRAM read completes, before its next
+	// instruction. 0 now; the slot was a stand-in for DmaReadAckCycles and
+	// for refresh lock-in, and 1 is the model before 2026-10-02.
+	DmaResumeTurns int
+
 	// Which ready thread issues: 0 round the threads by number, 1 the
 	// machine's order. With 1, a booted or resumed thread issues this many
 	// cycles after the boot or resume.
 	ThreadPolicy      int
 	BootDelayCycles   int
 	ResumeDelayCycles int
+	// The delay between the engine finishing a read and the thread waking.
+	// The engine is free during it, as for DmaWriteAckCycles.
+	DmaReadAckCycles int
 
 	ReadBandwidth  int
 	WriteBandwidth int
@@ -177,9 +185,11 @@ func DefaultConfig() Config {
 		MramRefreshInterval: 2736,
 		MramRefreshCycles:   120,
 		DmaPolicy:           0,
+		DmaResumeTurns:      0,
 		ThreadPolicy:        1,
 		BootDelayCycles:     13,
 		ResumeDelayCycles:   13,
+		DmaReadAckCycles:    9,
 
 		ReadBandwidth:  1,
 		WriteBandwidth: 3,
@@ -643,9 +653,11 @@ func (this Config) toCommandLineParser() *misc.CommandLineParser {
 	add_int("mram_refresh_phase", this.MramRefreshPhase)
 	add_int("mram_refresh_mode", this.MramRefreshMode)
 	add_int("dma_policy", this.DmaPolicy)
+	add_int("dma_resume_turns", this.DmaResumeTurns)
 	add_int("thread_policy", this.ThreadPolicy)
 	add_int("boot_delay_cycles", this.BootDelayCycles)
 	add_int("resume_delay_cycles", this.ResumeDelayCycles)
+	add_int("dma_read_ack_cycles", this.DmaReadAckCycles)
 	add_int("read_bandwidth", this.ReadBandwidth)
 	add_int("write_bandwidth", this.WriteBandwidth)
 

@@ -647,6 +647,27 @@ threads now wait on the locks as often as on the machine. The vector addition
 at 16 threads went from 1.9% slow to inside the machine's own spread. The
 other workloads stay inside the same range as before.
 
+## 2026-10-02 — One DPU at a time, and what a read really costs
+
+The genome search runs on 199 DPUs at once, so the machine cannot time one of
+them alone. The simulator can now record everything the host sends to one
+DPU and replay it on a single DPU, on the machine and in the simulator. The
+replays showed the search slow on every DPU checked.
+
+Small test programs then showed why. The simulator charged a thread one turn
+of the pipeline each time its memory read completed. That charge was a
+stand-in. On the machine, a loop that reads memory locks its rhythm to the
+memory's refresh, which comes every 2736 cycles; the loops the charge had been
+fitted on happened to sit on such a lock. Measured one read at a time, away
+from refresh, a read costs a fixed part and half a cycle per byte, and the
+old charge was too large for small reads and too small for large ones.
+
+**Result:** the search went from 1.1% slow to 0.6%. The other workloads stay
+inside the same range as before. Two known limits remain, and they are
+accepted: the machine's refresh does not keep a fixed clock, and a read costs
+a thread about two cycles more when other threads compete than when it is
+alone. They change the time, not the results.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.

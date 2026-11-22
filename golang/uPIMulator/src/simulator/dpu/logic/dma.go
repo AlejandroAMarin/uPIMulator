@@ -39,6 +39,9 @@ type Dma struct {
 	// as long as for a read, less the slot a read spends when it completes.
 	write_startup int64
 	write_ack     int64
+	// read_ack is the same for a read: its completion reaches the thread
+	// read_ack cycles after the engine is done with it.
+	read_ack int64
 
 	// turnaround is what the engine pays when a transfer goes the other way
 	// from the one before it, a read after a write or a write after a read.
@@ -78,6 +81,7 @@ func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
 	this.tail_per_kb = command_line_parser.IntParameter("dma_tail_cycles_per_kb")
 	this.write_startup = command_line_parser.IntParameter("dma_write_startup_cycles")
 	this.write_ack = command_line_parser.IntParameter("dma_write_ack_cycles")
+	this.read_ack = command_line_parser.IntParameter("dma_read_ack_cycles")
 	this.turnaround = command_line_parser.IntParameter("dma_turnaround_cycles")
 	this.has_last_op = false
 	this.switch_paid = false
@@ -336,7 +340,7 @@ func (this *Dma) ServiceReadyQ() {
 		if dma_command.MemoryOperation() == dram.WRITE {
 			this.ready_q.PushWithTimer(dma_command, this.write_ack)
 		} else {
-			this.ready_q.Push(dma_command)
+			this.ready_q.PushWithTimer(dma_command, this.read_ack)
 		}
 		this.busy = this.tail + (dma_command.Size()*this.tail_per_kb+512)/1024
 
