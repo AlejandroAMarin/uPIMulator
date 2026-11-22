@@ -15,14 +15,12 @@ func (this *Alu) Init() {
 func (this *Alu) Fini() {
 }
 
+// AtomicAddressHash is the atomic bit an acquire or release names. There are
+// 256 bits and the machine wraps the sum: SDK 2025's boot code releases bits
+// 256 down to 201 to clear them, and 256 is bit 0.
 func (this *Alu) AtomicAddressHash(operand1 int64, operand2 int64) int64 {
-	if operand1+operand2 >= 256 {
-		err := errors.New("operand1 + operand2 >= 256")
-		panic(err)
-	}
-
 	result, _, _ := this.Add(operand1, operand2)
-	return result
+	return result & 255
 }
 
 func (this *Alu) Add(operand1 int64, operand2 int64) (int64, bool, bool) {

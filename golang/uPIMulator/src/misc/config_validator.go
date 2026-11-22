@@ -165,6 +165,12 @@ func (this *ConfigValidator) AreOverlapped(
 	offset2 int64,
 	size2 int64,
 ) bool {
+	// On the machine atomic, IRAM and WRAM are separate address spaces that
+	// all start at 0, and a DPU ELF is linked that way.
+	if HardwareMemoryMap() {
+		return false
+	}
+
 	if offset1 <= offset2 && offset2 <= offset1+size1 {
 		return true
 	} else if offset1 <= offset2+size2 && offset2+size2 <= offset1+size1 {

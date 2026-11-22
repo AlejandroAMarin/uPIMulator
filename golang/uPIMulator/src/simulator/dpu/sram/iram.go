@@ -27,8 +27,10 @@ func (this *Iram) Init() {
 	this.address = config_loader.IramOffset()
 	this.size = config_loader.IramSize()
 
+	// The storage holds IramInstructions encodings of IramDataWidth bits
+	// each, whatever step the program counter takes between them.
 	this.byte_stream = new(encoding.ByteStream)
-	this.byte_stream.InitSize(this.size)
+	this.byte_stream.InitSize(config_loader.IramInstructions() * int64(config_loader.IramDataWidth()/8))
 
 	this.decoded = make(map[int64]*instruction.Instruction, 0)
 }
@@ -87,24 +89,26 @@ func (this *Iram) Write(address int64, byte_stream *encoding.ByteStream) {
 	}
 }
 
+// Index is the byte offset in the storage of the instruction at address.
 func (this *Iram) Index(address int64) int {
 	config_loader := new(misc.ConfigLoader)
 	config_loader.Init()
 
+	stride := config_loader.IramStride()
 	iram_data_size := int64(config_loader.IramDataWidth() / 8)
 
 	if address < this.address {
 		err := errors.New("address < IRAM offset")
 		panic(err)
-	} else if address+iram_data_size > this.address+this.size {
+	} else if address+stride > this.address+this.size {
 		err := errors.New("address >= IRAM offset + IRAM size")
 		panic(err)
 	}
 
-	if (address-this.address)%iram_data_size != 0 {
+	if (address-this.address)%stride != 0 {
 		err := errors.New("addresses are not aligned with IRAM data size")
 		panic(err)
 	}
 
-	return int(address - this.address)
+	return int((address - this.address) / stride * iram_data_size)
 }

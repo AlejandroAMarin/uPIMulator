@@ -49,6 +49,10 @@ build_kernel() {
         { echo "$name: link failed; see $work/$name.link.log" >&2; exit 1; }
 }
 
+# By default the simulator runs the DPU ELF the host loads, the same file
+# the machine runs. UPIM_ELF=0 runs the image of a uPIMulator linker run instead.
+elf="${UPIM_ELF:-1}"
+
 # compare <name> <host-binary> [env...]: runs both backends and diffs.
 compare() {
     local name="$1" host="$2"; shift 2
@@ -56,7 +60,7 @@ compare() {
     env "$@" ALU_PROFILE="backend=simulator" UPMEM_PROFILE="backend=simulator" \
         "$host" >>"$work/$name.ref.txt"
 
-    env "$@" "$runner/upimulator" run --program-dir "$work/$name" --tasklets 1 \
+    env "$@" "$runner/upimulator" run $([ "$elf" = 1 ] || echo --program-dir "$work/$name") --tasklets 1 \
         -- "$host" 2>&1 | grep -v check_symbols >>"$work/$name.upim.txt"
 }
 

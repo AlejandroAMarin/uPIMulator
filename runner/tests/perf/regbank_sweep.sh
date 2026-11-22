@@ -17,6 +17,8 @@
 # The hardware runs ask for backend=hw deliberately.
 
 set -eu
+# By default the simulator runs the DPU ELF the host loads, the same file
+# the machine runs. UPIM_ELF=0 runs the image of a uPIMulator linker run instead.
 
 here="$(dirname "$(readlink -f "$0")")"
 runner="$here/../.."
@@ -48,7 +50,7 @@ for t in $tasklets; do
         XBIN="$work/dpu_$t" "$work/host" | tail -n +2 >"$work/hw_$t.tsv"
 
     LOOPS="$loops" TASKLETS="$t" XBIN="$work/dpu_$t" \
-        "$runner/upimulator" run --program-dir "$work/bin_$t" --tasklets "$t" --dpus 1 \
+        "$runner/upimulator" run $([ "${UPIM_ELF:-1}" = 1 ] || echo --program-dir "$work/bin_$t") --tasklets "$t" --dpus 1 \
         -- "$work/host" 2>/dev/null | grep -E '^[0-9]+	' >"$work/sim_$t.tsv"
 
     echo

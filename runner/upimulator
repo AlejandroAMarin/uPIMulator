@@ -1,7 +1,13 @@
 #!/bin/bash
 # upimulator -- run a compiled UPMEM host program against the simulator.
 #
+#   upimulator run --tasklets N [options] -- ./host args...
 #   upimulator run --program-dir DIR --tasklets N [options] -- ./host args...
+#
+# Without --program-dir the DPUs run the ELF the host passes to dpu_load: the
+# very file the machine would run, with the SDK's own runtime and UPMEM's
+# address map. With it they run the image of a uPIMulator linker run instead,
+# which must be built from the same kernel source with the same flags.
 #
 # The host binary is not modified or rebuilt. LD_PRELOAD puts libdpusim in front
 # of libdpu, so every DPU call is served by uPIMulator.
@@ -12,7 +18,7 @@
 # hardware run producing plausible but meaningless numbers.
 #
 # Options:
-#   --program-dir DIR   bin directory of a uPIMulator linker run (required)
+#   --program-dir DIR   bin directory of a uPIMulator linker run (optional; see above)
 #   --tasklets N        tasklets per DPU; must match how the image was built
 #   --dpus N            DPU count for programs that ask for DPU_ALLOCATE_ALL
 #   --max-cycles N      abort a launch after N cycles (0 = no limit)
@@ -50,22 +56,20 @@ if [ $# -lt 1 ]; then
     exit 2
 fi
 
-if [ -z "$program_dir" ]; then
-    echo "upimulator: --program-dir is required (the bin directory of a linker run)" >&2
-    exit 2
-fi
 
 if [ -z "$tasklets" ]; then
     echo "upimulator: --tasklets is required, and must match how the DPU image was built" >&2
     exit 2
 fi
 
-for needed in addresses.txt values.txt iram.bin wram.bin mram.bin atomic.bin; do
-    if [ ! -f "$program_dir/$needed" ]; then
-        echo "upimulator: $program_dir is not a linked program directory (no $needed)" >&2
-        exit 2
-    fi
-done
+if [ -n "$program_dir" ]; then
+    for needed in addresses.txt values.txt iram.bin wram.bin mram.bin atomic.bin; do
+        if [ ! -f "$program_dir/$needed" ]; then
+            echo "upimulator: $program_dir is not a linked program directory (no $needed)" >&2
+            exit 2
+        fi
+    done
+fi
 
 binary="$1"
 
@@ -89,7 +93,11 @@ fi
 # hide the hardware backend so a gap in the shim fails instead of allocating.
 source "$here/scripts/isolation_env.sh"
 
-export UPIM_PROGRAM_DIR="$(readlink -f "$program_dir")"
+if [ -n "$program_dir" ]; then
+    export UPIM_PROGRAM_DIR="$(readlink -f "$program_dir")"
+else
+    unset UPIM_PROGRAM_DIR
+fi
 export UPIM_NUM_TASKLETS="$tasklets"
 export UPIM_NUM_DPUS="$dpus"
 export UPIM_MAX_CYCLES="$max_cycles"

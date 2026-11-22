@@ -800,7 +800,7 @@ func (this *Logic) ExecuteCallRri(instruction_ *instruction.Instruction) {
 	config_loader := new(misc.ConfigLoader)
 	config_loader.Init()
 
-	iram_data_size := int64(config_loader.IramDataWidth() / 8)
+	iram_data_size := config_loader.IramStride()
 
 	if imm == 0 {
 		result, carry, _ = this.alu.Add(ra, imm)
@@ -1465,7 +1465,7 @@ func (this *Logic) ExecuteRrr(instruction_ *instruction.Instruction) {
 		config_loader.Init()
 
 		pc := thread.RegFile().ReadPcReg()
-		iram_data_size := int64(config_loader.IramDataWidth() / 8)
+		iram_data_size := config_loader.IramStride()
 
 		thread.RegFile().WriteGpReg(instruction_.Rc(), pc+iram_data_size)
 		thread.RegFile().WritePcReg(result)
@@ -2150,7 +2150,7 @@ func (this *Logic) ExecuteCallZri(instruction_ *instruction.Instruction) {
 	config_loader := new(misc.ConfigLoader)
 	config_loader.Init()
 
-	iram_data_size := int64(config_loader.IramDataWidth() / 8)
+	iram_data_size := config_loader.IramStride()
 
 	if imm == 0 {
 		result, carry, _ = this.alu.Add(ra, imm)
@@ -5325,8 +5325,32 @@ func (this *Logic) ExecuteLdmaDmaRri(instruction_ *instruction.Instruction) {
 	rb := thread.RegFile().ReadSrcReg(instruction_.Rb(), word.SIGNED)
 	imm := instruction_.Imm().Value()
 
+	wram_address, mram_address := this.DmaAddresses(ra, rb)
+
+	size := (1 + this.alu.And(imm+this.alu.And(this.alu.Lsr(ra, 24), 255), 255)) * this.min_access_granularity
+
+	this.dma.TransferFromMramToWram(wram_address, mram_address, size, instruction_, thread.ThreadId())
+
+	thread.RegFile().ClearConditions()
+}
+
+// DmaAddresses takes a DMA's WRAM and MRAM addresses from its two registers.
+// With uPIMulator's own address map they are masked to the width of the
+// memory's end. With UPMEM's, as a DPU ELF is linked, the machine takes each
+// modulo its memory's size: the linker tags MRAM with 0x08000000, but the
+// code loads an MRAM address without the tag (a kernel's first MRAM variable
+// is at 0), and the length a transfer carries in the WRAM register's top byte
+// is not part of the address either.
+func (this *Logic) DmaAddresses(ra int64, rb int64) (int64, int64) {
 	config_loader := new(misc.ConfigLoader)
 	config_loader.Init()
+
+	if misc.HardwareMemoryMap() {
+		wram_address := this.AlignDmaAddress(this.alu.And(ra, config_loader.WramSize()-1))
+		mram_address := config_loader.MramOffset() +
+			this.AlignDmaAddress(this.alu.And(rb, config_loader.MramSize()-1))
+		return wram_address, mram_address
+	}
 
 	wram_end_address := config_loader.WramOffset() + config_loader.WramSize()
 	wram_end_address_width := int(math.Floor(math.Log2(float64(wram_end_address))) + 1)
@@ -5338,11 +5362,7 @@ func (this *Logic) ExecuteLdmaDmaRri(instruction_ *instruction.Instruction) {
 	mram_mask := this.Pow2(mram_end_address_width) - 1
 	mram_address := this.AlignDmaAddress(this.alu.And(rb, mram_mask))
 
-	size := (1 + this.alu.And(imm+this.alu.And(this.alu.Lsr(ra, 24), 255), 255)) * this.min_access_granularity
-
-	this.dma.TransferFromMramToWram(wram_address, mram_address, size, instruction_, thread.ThreadId())
-
-	thread.RegFile().ClearConditions()
+	return wram_address, mram_address
 }
 
 func (this *Logic) ExecuteLdmaiDmaRri(instruction_ *instruction.Instruction) {
@@ -5365,18 +5385,7 @@ func (this *Logic) ExecuteSdmaDmaRri(instruction_ *instruction.Instruction) {
 	rb := thread.RegFile().ReadSrcReg(instruction_.Rb(), word.SIGNED)
 	imm := instruction_.Imm().Value()
 
-	config_loader := new(misc.ConfigLoader)
-	config_loader.Init()
-
-	wram_end_address := config_loader.WramOffset() + config_loader.WramSize()
-	wram_end_address_width := int(math.Floor(math.Log2(float64(wram_end_address))) + 1)
-	wram_mask := this.Pow2(wram_end_address_width) - 1
-	wram_address := this.AlignDmaAddress(this.alu.And(ra, wram_mask))
-
-	mram_end_address := config_loader.MramOffset() + config_loader.MramSize()
-	mram_end_address_width := int(math.Floor(math.Log2(float64(mram_end_address))) + 1)
-	mram_mask := this.Pow2(mram_end_address_width) - 1
-	mram_address := this.AlignDmaAddress(this.alu.And(rb, mram_mask))
+	wram_address, mram_address := this.DmaAddresses(ra, rb)
 
 	size := (1 + this.alu.And(imm+this.alu.And(this.alu.Lsr(ra, 24), 255), 255)) * this.min_access_granularity
 

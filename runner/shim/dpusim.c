@@ -10,7 +10,9 @@
  * Configuration comes from the environment, set by the upimulator launcher:
  *
  *   UPIM_PROGRAM_DIR    bin directory of a uPIMulator linker run, holding the
- *                       DPU image and its symbol tables
+ *                       DPU image and its symbol tables. Unset, the kernel is
+ *                       the DPU ELF the host passes to dpu_load, which is
+ *                       what the machine runs.
  *   UPIM_NUM_TASKLETS   tasklets per DPU; must match how the image was built
  *   UPIM_NUM_DPUS       DPU count to use when the program asks for
  *                       DPU_ALLOCATE_ALL
@@ -37,8 +39,9 @@ typedef struct {
 } shim_dpu_t;
 
 struct shim_set {
-    int handle;
+    int handle; /* -1 until dpu_load when the kernel is the host's ELF */
     uint32_t nr_dpus;
+    long num_tasklets;
 
     shim_dpu_t *dpus;
 
@@ -138,6 +141,13 @@ static int dpu_index_of(struct dpu_set_t dpu_set)
     return -1;
 }
 
+static void free_set(struct shim_set *set)
+{
+    free(set->dpus);
+    free(set->xfer);
+    free(set);
+}
+
 /* ------------------------------------------------------- allocate / free --- */
 
 dpu_error_t dpu_alloc(uint32_t nr_dpus, const char *profile, struct dpu_set_t *dpu_set)
@@ -148,8 +158,8 @@ dpu_error_t dpu_alloc(uint32_t nr_dpus, const char *profile, struct dpu_set_t *d
 
     const char *program_dir = getenv("UPIM_PROGRAM_DIR");
 
-    if (program_dir == NULL) {
-        fprintf(stderr, "[upimulator] UPIM_PROGRAM_DIR is not set; "
+    if (getenv("UPIM_NUM_TASKLETS") == NULL) {
+        fprintf(stderr, "[upimulator] UPIM_NUM_TASKLETS is not set; "
                         "run this program through the upimulator launcher\n");
         return DPU_ERR_ALLOCATION;
     }
@@ -167,11 +177,18 @@ dpu_error_t dpu_alloc(uint32_t nr_dpus, const char *profile, struct dpu_set_t *d
         return DPU_ERR_SYSTEM;
     }
 
-    set->handle = upim_set_create((char *)program_dir, (int)nr_dpus, (int)num_tasklets);
+    set->num_tasklets = num_tasklets;
+    set->handle = -1;
 
-    if (set->handle < 0) {
-        free(set);
-        return fail(DPU_ERR_ALLOCATION, "dpu_alloc");
+    /* With a linker run the image is known now. Without one it is the ELF the
+     * host names in dpu_load, and the set is built there. */
+    if (program_dir != NULL) {
+        set->handle = upim_set_create((char *)program_dir, (int)nr_dpus, (int)num_tasklets);
+
+        if (set->handle < 0) {
+            free_set(set);
+            return fail(DPU_ERR_ALLOCATION, "dpu_alloc");
+        }
     }
 
     set->nr_dpus = nr_dpus;
@@ -180,9 +197,7 @@ dpu_error_t dpu_alloc(uint32_t nr_dpus, const char *profile, struct dpu_set_t *d
 
     if (set->dpus == NULL || set->xfer == NULL) {
         upim_set_free(set->handle);
-        free(set->dpus);
-        free(set->xfer);
-        free(set);
+        free_set(set);
         return DPU_ERR_SYSTEM;
     }
 
@@ -193,7 +208,8 @@ dpu_error_t dpu_alloc(uint32_t nr_dpus, const char *profile, struct dpu_set_t *d
 
     *dpu_set = set_of(set);
 
-    trace("dpu_alloc: %u DPUs, %ld tasklets, program %s", nr_dpus, num_tasklets, program_dir);
+    trace("dpu_alloc: %u DPUs, %ld tasklets, program %s", nr_dpus, num_tasklets,
+          program_dir != NULL ? program_dir : "(the ELF given to dpu_load)");
     return DPU_OK;
 }
 
@@ -272,6 +288,13 @@ dpu_error_t dpu_free(struct dpu_set_t dpu_set)
     }
 
     trace("dpu_free");
+
+    /* A set the host never loaded has nothing in the simulator to free. */
+    if (set->handle < 0) {
+        free_set(set);
+        return DPU_OK;
+    }
+
     report_stats(set);
 
     /* Hosts usually read the DPU log only on a failure path, which hides the
@@ -287,9 +310,7 @@ dpu_error_t dpu_free(struct dpu_set_t dpu_set)
         return fail(DPU_ERR_INTERNAL, "dpu_free");
     }
 
-    free(set->dpus);
-    free(set->xfer);
-    free(set);
+    free_set(set);
 
     return DPU_OK;
 }
@@ -317,20 +338,49 @@ dpu_error_t dpu_get_nr_ranks(struct dpu_set_t dpu_set, uint32_t *nr_ranks)
 
 dpu_error_t dpu_load(struct dpu_set_t dpu_set, const char *binary_path, struct dpu_program_t **program)
 {
-    /* The image was built by uPIMulator's own toolchain and installed when the
-     * set was created, because this simulator links assembly text rather than
-     * the ELF the host names here. The path is recorded for the log only.
-     *
-     * If you point a host program at a different kernel, change
-     * UPIM_PROGRAM_DIR to match, or the run will silently measure the wrong
-     * kernel. */
-    (void)dpu_set;
-
     if (program != NULL) {
         *program = NULL;
     }
 
-    trace("dpu_load: %s (serving UPIM_PROGRAM_DIR instead)", binary_path ? binary_path : "(null)");
+    /* With UPIM_PROGRAM_DIR the image was built by uPIMulator's own linker and
+     * installed when the set was created; the path is recorded for the log
+     * only. Point a host at a different kernel and UPIM_PROGRAM_DIR must
+     * change with it, or the run measures the wrong kernel. */
+    if (getenv("UPIM_PROGRAM_DIR") != NULL) {
+        trace("dpu_load: %s (serving UPIM_PROGRAM_DIR instead)", binary_path ? binary_path : "(null)");
+        return DPU_OK;
+    }
+
+    /* Without it the kernel is this ELF, the file the machine would run. A
+     * second load starts the DPUs afresh, as it does on the machine.
+     * DPU_LOAD_OVERRIDE names another ELF instead, as
+     * runner/scripts/dpuload_override.c does for a hardware run, so one
+     * setting points both sides at the same kernel. */
+    struct shim_set *set = shim_set_of(dpu_set);
+    const char *override = getenv("DPU_LOAD_OVERRIDE");
+
+    if (override != NULL && *override != 0) {
+        trace("dpu_load: %s -> %s (DPU_LOAD_OVERRIDE)", binary_path ? binary_path : "(null)", override);
+        binary_path = override;
+    }
+
+    if (set == NULL || binary_path == NULL) {
+        return DPU_ERR_INVALID_DPU_SET;
+    }
+
+    if (set->handle >= 0) {
+        upim_set_free(set->handle);
+        set->handle = -1;
+    }
+
+    set->handle = upim_set_create((char *)binary_path, (int)set->nr_dpus, (int)set->num_tasklets);
+
+    if (set->handle < 0) {
+        return fail(DPU_ERR_ELF_INVALID_FILE, "dpu_load");
+    }
+
+    set->launched = 0;
+    trace("dpu_load: %s", binary_path);
     return DPU_OK;
 }
 
@@ -794,6 +844,12 @@ char *dpu_error_to_string(dpu_error_t status)
         break;
     case DPU_ERR_MRAM_BUSY:
         text = "DPU memory is busy (simulated)";
+        break;
+    case DPU_ERR_INVALID_DPU_SET:
+        text = "invalid DPU set (simulated)";
+        break;
+    case DPU_ERR_ELF_INVALID_FILE:
+        text = "invalid ELF file (simulated)";
         break;
     default:
         text = "unknown error (simulated)";

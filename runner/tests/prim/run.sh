@@ -20,6 +20,10 @@
 
 set -eu
 
+# By default the simulator runs the DPU ELF the host loads, the same file
+# the machine runs. UPIM_ELF=0 runs the image of a uPIMulator linker run instead.
+elf="${UPIM_ELF:-1}"
+
 here="$(dirname "$(readlink -f "$0")")"
 runner="$here/../.."
 upim="$runner/../golang/uPIMulator"
@@ -104,7 +108,7 @@ for k in $kernels; do
         }
         sim() {
             XBIN="$work/${k}_dpu_$t" "$runner/upimulator" run \
-                --program-dir "$work/${k}_bin_$t" --tasklets "$t" --dpus 1 \
+                $([ "$elf" = 1 ] || echo --program-dir "$work/${k}_bin_$t") --tasklets "$t" --dpus 1 \
                 -- "$work/${k}_host"
         }
 

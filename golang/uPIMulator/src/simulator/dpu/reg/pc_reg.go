@@ -32,7 +32,5 @@ func (this *PcReg) Increment() {
 	config_loader := new(misc.ConfigLoader)
 	config_loader.Init()
 
-	iram_data_size := int64(config_loader.IramDataWidth() / 8)
-
-	this.Write(this.Read() + iram_data_size)
+	this.Write(this.Read() + config_loader.IramStride())
 }

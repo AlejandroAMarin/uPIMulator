@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"sync"
 	"uPIMulator/src/api"
+	"uPIMulator/src/elfload"
+	"uPIMulator/src/misc"
 	"uPIMulator/src/simulator/host"
 	"unsafe"
 )
@@ -64,8 +66,9 @@ func upim_last_error() *C.char {
 	return C.CString(last_error)
 }
 
-// upim_set_create builds a set of num_dpus DPUs running the program in
-// program_dir, which is the bin directory produced by a linker run.
+// upim_set_create builds a set of num_dpus DPUs running the program at
+// program_dir: either the bin directory of a uPIMulator linker run, or a DPU
+// ELF, the file the machine itself would load.
 //
 //export upim_set_create
 func upim_set_create(program_dir *C.char, num_dpus C.int, num_tasklets C.int) C.int {
@@ -165,6 +168,28 @@ func loadProgram(program_dir string) (program *host.Program, err error) {
 		return nil, fmt.Errorf("no program directory was given")
 	}
 
+	info, err := os.Stat(program_dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// An ELF runs with UPMEM's address map and a linker run with uPIMulator's.
+	// The map is one setting for the whole process, so one process cannot
+	// hold both kinds of program.
+	registry_mutex.Lock()
+	defer registry_mutex.Unlock()
+
+	if !info.IsDir() {
+		if len(registry) > 0 && !misc.HardwareMemoryMap() {
+			return nil, fmt.Errorf("%s is an ELF, but a linker-run program is already loaded", program_dir)
+		}
+		misc.UseHardwareMemoryMap(true)
+		return elfload.Load(program_dir)
+	}
+
+	if misc.HardwareMemoryMap() {
+		return nil, fmt.Errorf("%s is a linker run, but an ELF is already loaded", program_dir)
+	}
 	return host.LoadProgramFromDir(program_dir), nil
 }
 

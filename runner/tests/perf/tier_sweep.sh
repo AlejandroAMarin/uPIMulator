@@ -19,6 +19,10 @@
 
 set -eu
 
+# By default the simulator runs the DPU ELF the host loads, the same file
+# the machine runs. UPIM_ELF=0 runs the image of a uPIMulator linker run instead.
+elf="${UPIM_ELF:-1}"
+
 here="$(dirname "$(readlink -f "$0")")"
 bimsa="${BIMSA_DIR:-/home/alex/PNM-simulator/bimsa}/upmem"
 work="${1:-/tmp/upim-tier}"
@@ -43,7 +47,7 @@ for tier in $tiers; do
 
     (cd "$bimsa" && UPMEM_PROFILE=backend=hw ./bin/bimsa_host \
         -i "$input" -s "$seqsize" -e 1 -w 0) >"$hw" 2>&1
-    (cd "$bimsa" && "$here/../../upimulator" run --program-dir "$work/t$tier/bin" \
+    (cd "$bimsa" && "$here/../../upimulator" run $([ "$elf" = 1 ] || echo --program-dir "$work/t$tier/bin") \
         --tasklets "$tasklets" --dpus 1 -- ./bin/bimsa_host \
         -i "$input" -s "$seqsize" -e 1 -w 0) >"$sim" 2>&1
 

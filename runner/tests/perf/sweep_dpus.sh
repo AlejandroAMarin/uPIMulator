@@ -15,6 +15,8 @@
 # The hardware runs ask for backend=hw deliberately.
 
 set -eu
+# By default the simulator runs the DPU ELF the host loads, the same file
+# the machine runs. UPIM_ELF=0 runs the image of a uPIMulator linker run instead.
 
 here="$(dirname "$(readlink -f "$0")")"
 bimsa="${BIMSA_DIR:-/home/alex/PNM-simulator/bimsa}/upmem"
@@ -62,7 +64,7 @@ for nd in $dpu_counts; do
         -i "$input" -s "$seqsize" -e 1 -w 0) >"$hw" 2>&1
 
     (cd "$bimsa" && UPIM_STATS="$work/d$nd.stats.tsv" \
-        "$here/../../upimulator" run --program-dir "$work/d$nd/bin" \
+        "$here/../../upimulator" run $([ "${UPIM_ELF:-1}" = 1 ] || echo --program-dir "$work/d$nd/bin") \
         --tasklets "$tasklets" --dpus "$nd" -- ./bin/bimsa_host \
         -i "$input" -s "$seqsize" -e 1 -w 0) >"$sim" 2>&1
 

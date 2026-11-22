@@ -591,6 +591,38 @@ function whose length differs between the machine's program and the
 simulator's. The lasting fix would be for the simulator to run the machine's
 own program file, and that is the next task.
 
+## 2026-09-30 — The simulator runs the machine's own program file
+
+Yesterday's lesson was that the two sides must run the same program. Today the
+simulator does: it takes the very file the host hands to the machine's loader,
+instead of a separate build of the same source.
+
+The file is in UPMEM's binary format, and the simulator never had a decoder for
+it. Writing one for several hundred instructions would have taken long. Instead,
+the loader asks UPMEM's own disassembler for the text of each instruction, and
+reads that text with the grammar the simulator already had for assembly. It
+accepts every instruction in every program here.
+
+Three things about the machine had to be learned on the way, each from a test
+that failed:
+
+- **A code address is a count of instructions**, not a byte address. The
+  machine's jump tables hold instruction numbers.
+- **The memory for large data has a label in the address that the machine
+  ignores.** The program files mark it with a high address, but the code loads
+  addresses without the mark, and the machine drops it.
+- **The machine's start-up code counts one past its 256 lock bits,** and the
+  machine wraps back to the first one.
+
+The simulator now uses the machine's own layout of its memories for such a
+file, which also removes an old difference in the size of the local memory.
+
+**Result:** the arithmetic tests pass on the machine's own files, every timing
+agrees with the old path where the code was already the same, and the genome
+search compares like for like at last: its lookup phase is exact, and its
+search is 1.1% slow. That 1.1% is now a real model error, not two different
+programs.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.
