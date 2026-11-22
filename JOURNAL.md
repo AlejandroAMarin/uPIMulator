@@ -561,6 +561,36 @@ The lesson is about the measuring, not the model. A median hides a program
 that can end up in two different states. The test now prints the fastest and
 slowest run beside the median, so the next such case shows at once.
 
+## 2026-09-29 — Checking that both sides run the same program
+
+The vector addition at 16 threads was still 1.5% slow in the simulator, and
+all of it was in the first few thousand cycles, where every thread asks for
+memory at once. A small test of that request alone was 5% fast in the
+simulator even with one thread, where nothing competes.
+
+The reason was not in the timing model. The machine and the simulator were
+running different code for the memory request. The machine uses the 2025
+version of UPMEM's runtime library, which it gets prebuilt. The simulator
+builds its own copy from older sources. The two versions differ by one
+instruction in that function, and by a few in two others. I changed the
+simulator's copy to match, and the test now agrees to the cycle.
+
+Checking this led to a larger problem. The genome search program's hardware
+binary was built in June; the simulator's copy was built from today's source.
+They compute the same answers, but they are not the same machine code. Every
+timing comparison of that program so far compared two different builds. Built
+alike, its two phases are within 0.24% and 0.99%.
+
+What is left of the vector addition is the order in which waiting threads get
+a lock. The machine hands it on in an order that is not the threads' number,
+and the simulator does not. I could not find the rule.
+
+**The lesson:** before comparing how long two things take, check that they
+are the same thing. The comparison now has a tool for that, which lists every
+function whose length differs between the machine's program and the
+simulator's. The lasting fix would be for the simulator to run the machine's
+own program file, and that is the next task.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.

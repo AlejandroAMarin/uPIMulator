@@ -23,12 +23,18 @@ mem_alloc_nolock(size_t size)
     if (size != 0) {
         pointer = (pointer + 7) & ~7;
 
-        unsigned int new_heap_pointer, dummy;
+        unsigned int new_heap_pointer, limit;
 
-        __asm__ volatile("\tadd %[nhp], %[ptr], %[sz], nc, . + 2\n"
+        /* The instructions of SDK 2025.1's mem_alloc_nolock, which is what
+         * the machine links: the new pointer is checked against the end of
+         * WRAM instead of probed with a load. The machine's limit is 65536;
+         * the simulator places WRAM at 512 and gives it 128 KB, so its limit
+         * is the end of that, which changes no instruction. */
+        __asm__ volatile("\tmove %[lim], 131584\n"
+                         "\tadd %[nhp], %[ptr], %[sz], c, . + 2\n"
+                         "\tjltu %[nhp], %[lim], . + 2\n"
                          "\tfault " __STR(__FAULT_ALLOC_HEAP_FULL__) "\n"
-                                                                     "\tlbu %[dumb], %[nhp], -1\n"
-                         : [nhp] "=r"(new_heap_pointer), [dumb] "=r"(dummy)
+                         : [nhp] "=&r"(new_heap_pointer), [lim] "=&r"(limit)
                          : [ptr] "r"(pointer), [sz] "r"(size));
 
         __HEAP_POINTER = new_heap_pointer;
