@@ -225,12 +225,27 @@ func (this *Host) Check(execution int) {
 }
 
 func (this *Host) Launch() {
+	this.LaunchDpus(nil)
+}
+
+// LaunchDpus boots the DPUs at the given indices into Dpus(), or every DPU when
+// indices is nil. A host may launch one rank of a set and leave the others
+// idle, as libdpu allows.
+func (this *Host) LaunchDpus(indices []int) {
 	config_loader := new(misc.ConfigLoader)
 	config_loader.Init()
 
 	dpus := this.Dpus()
 
-	for _, dpu_ := range dpus {
+	if indices == nil {
+		indices = make([]int, len(dpus))
+		for i := range indices {
+			indices[i] = i
+		}
+	}
+
+	for _, index := range indices {
+		dpu_ := dpus[index]
 		threads := dpu_.Threads()
 
 		for _, thread := range threads {

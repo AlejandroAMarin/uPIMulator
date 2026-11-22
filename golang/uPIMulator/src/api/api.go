@@ -115,6 +115,13 @@ type Config struct {
 	RankWriteMbps int
 	RankReadMbps  int
 
+	// What the host itself can move, in MB/s, summed over every rank of a
+	// transfer. Ranks transfer in parallel, but the host gathers or scatters
+	// all of their data, so a transfer over many ranks is limited by this and
+	// not by the rank interfaces. Measured by runner/tests/perf/rank_host.c.
+	HostWriteMbps int
+	HostReadMbps  int
+
 	// What a transfer costs before a single byte moves, in nanoseconds. This
 	// is the whole cost of anything small: on this machine an 8-byte transfer
 	// and a 512-byte one both take about 30 us. A model without it reports a
@@ -127,6 +134,11 @@ type Config struct {
 	// and a short run is dominated by it: it is 40% of everything BIMSA spends
 	// moving data.
 	TransferFirstNs int
+
+	// Extra nanoseconds for each rank of a transfer after the first. The host
+	// starts one rank after another, so a small transfer to 16 ranks costs
+	// about six times one to a single rank.
+	TransferRankSetupNs int
 
 	// BinDirpath is only used by Dump. Leave it empty if you do not call Dump.
 	BinDirpath string
@@ -206,9 +218,12 @@ func DefaultConfig() Config {
 		DpuReadMbps:   250,
 		RankWriteMbps: 9700,
 		RankReadMbps:  3400,
+		HostWriteMbps: 11200,
+		HostReadMbps:  4050,
 
-		TransferSetupNs: 30000,
-		TransferFirstNs: 250000,
+		TransferSetupNs:     30000,
+		TransferFirstNs:     250000,
+		TransferRankSetupNs: 25000,
 	}
 }
 
@@ -220,7 +235,9 @@ type Set struct {
 	addresses map[string]int64
 	values    map[string]int64
 
-	launched bool
+	// active marks the DPUs a launch has started. A host may launch one rank
+	// and leave the others idle, so the set runs until these are done.
+	active   []bool
 	baseline []map[string]int64
 
 	// What the host spent moving data, which no DPU counter sees. Transfers
@@ -260,6 +277,7 @@ func New(config Config, program *host.Program) (set *Set, err error) {
 		config:    config,
 	}
 	set.baseline = make([]map[string]int64, len(set.dpus))
+	set.active = make([]bool, len(set.dpus))
 
 	if err := set.writeClocksPerSec(config.LogicFrequency); err != nil {
 		return nil, err
@@ -297,40 +315,58 @@ func (this *Set) writeClocksPerSec(logic_frequency_mhz int) error {
 }
 
 // TransferCycles returns what a host transfer of bytes_per_dpu to or from each
-// of num_dpus DPUs costs, in DPU clock cycles.
+// of num_dpus DPUs costs, in DPU clock cycles. The DPUs lie on num_ranks ranks,
+// and the fullest of those ranks holds rank_dpus of them.
 //
-// A transfer costs a fixed setup plus the time to move the bytes. Two limits
-// apply to the moving and the slower one wins: one DPU's link carries
-// DpuWriteMbps or DpuReadMbps whatever else is going on, and every DPU on a
-// rank shares an interface carrying RankWriteMbps or RankReadMbps. Writing to
+// A transfer costs a fixed setup plus the time to move the bytes. Three limits
+// apply to the moving and the slowest one wins: one DPU's link carries
+// DpuWriteMbps or DpuReadMbps whatever else is going on; every DPU on a rank
+// shares an interface carrying RankWriteMbps or RankReadMbps; and the host
+// moves the data of every rank, at HostWriteMbps or HostReadMbps. Writing to
 // 8 DPUs at once therefore costs the same as writing to one, because the rank
 // interface is nowhere near saturated; writing to a full rank is limited by
-// the interface instead.
+// the interface instead; and writing to many ranks is limited by the host,
+// because the ranks move in parallel but the host serves them all. Each rank
+// after the first adds TransferRankSetupNs to the setup.
 //
 // The setup is not a rounding error. Below about 32 KB it is the whole cost,
 // and a kernel that makes many small transfers -- BIMSA makes eleven -- is
 // dominated by it.
 //
-// The shape is deliberately simple, and it is wrong in two known places: the
-// real machine's cost per DPU grows with the chunk size somewhere between 512
-// bytes and 4 KB rather than at a fixed rate, and a scatter of multi-megabyte
-// buffers to a whole rank falls below the link's capability because the host
-// has to gather them. runner/tests/perf/README.md measures both.
-//
-// Both numbers are measured, not assumed: see runner/tests/perf/README.md for
-// the sweep they come from and for how far this two-limit shape is from the
-// machine in between the two regimes.
-func (this *Set) TransferCycles(num_dpus int, bytes_per_dpu int64, to_dpu bool) int64 {
+// The shape is deliberately simple, and it is wrong in known places: the real
+// machine's cost per DPU grows with the chunk size somewhere between 512 bytes
+// and 4 KB rather than at a fixed rate; a scatter of multi-megabyte buffers to
+// a whole rank falls below the link's capability because the host has to
+// gather them; and ranks that share a memory channel are slower than ranks on
+// two channels, which depends on the ranks the machine hands out and is not
+// modelled. runner/tests/perf/README.md measures all three.
+func (this *Set) TransferCycles(
+	num_dpus int,
+	num_ranks int,
+	rank_dpus int,
+	bytes_per_dpu int64,
+	to_dpu bool,
+) int64 {
 	if num_dpus <= 0 || bytes_per_dpu <= 0 {
 		return 0
 	}
 
+	if num_ranks < 1 {
+		num_ranks = 1
+	}
+
+	if rank_dpus <= 0 || rank_dpus > num_dpus {
+		rank_dpus = num_dpus
+	}
+
 	dpu_mbps := int64(this.config.DpuReadMbps)
 	rank_mbps := int64(this.config.RankReadMbps)
+	host_mbps := int64(this.config.HostReadMbps)
 
 	if to_dpu {
 		dpu_mbps = int64(this.config.DpuWriteMbps)
 		rank_mbps = int64(this.config.RankWriteMbps)
+		host_mbps = int64(this.config.HostWriteMbps)
 	}
 
 	if dpu_mbps <= 0 || rank_mbps <= 0 {
@@ -342,15 +378,21 @@ func (this *Set) TransferCycles(num_dpus int, bytes_per_dpu int64, to_dpu bool) 
 	// transfer a DPU could hold.
 	mhz := int64(this.config.LogicFrequency)
 
-	per_dpu := bytes_per_dpu * mhz / dpu_mbps
-	whole_rank := bytes_per_dpu * int64(num_dpus) * mhz / rank_mbps
+	moving := bytes_per_dpu * mhz / dpu_mbps
 
-	moving := per_dpu
-	if whole_rank > moving {
+	if whole_rank := bytes_per_dpu * int64(rank_dpus) * mhz / rank_mbps; whole_rank > moving {
 		moving = whole_rank
 	}
 
-	setup := int64(this.config.TransferSetupNs)
+	// A host rate of zero turns the host limit off.
+	if host_mbps > 0 {
+		if whole_host := bytes_per_dpu * int64(num_dpus) * mhz / host_mbps; whole_host > moving {
+			moving = whole_host
+		}
+	}
+
+	setup := int64(this.config.TransferSetupNs) +
+		int64(num_ranks-1)*int64(this.config.TransferRankSetupNs)
 
 	if this.transfer_count == 0 {
 		setup += int64(this.config.TransferFirstNs)
@@ -360,9 +402,16 @@ func (this *Set) TransferCycles(num_dpus int, bytes_per_dpu int64, to_dpu bool) 
 }
 
 // ChargeTransfer records a host transfer's cost. The data itself has already
-// moved; this is the time it would have taken.
-func (this *Set) ChargeTransfer(num_dpus int, bytes_per_dpu int64, to_dpu bool) {
-	this.transfer_cycles += this.TransferCycles(num_dpus, bytes_per_dpu, to_dpu)
+// moved; this is the time it would have taken. The arguments are those of
+// TransferCycles.
+func (this *Set) ChargeTransfer(
+	num_dpus int,
+	num_ranks int,
+	rank_dpus int,
+	bytes_per_dpu int64,
+	to_dpu bool,
+) {
+	this.transfer_cycles += this.TransferCycles(num_dpus, num_ranks, rank_dpus, bytes_per_dpu, to_dpu)
 	this.transfer_count++
 
 	if to_dpu {
@@ -455,33 +504,64 @@ func (this *Set) CopyFrom(dpu_index int, address int64, size int64) (data []byte
 // Launch starts the kernel on every DPU and records a statistics baseline, so
 // LaunchStats can report the cost of this run alone.
 func (this *Set) Launch() (err error) {
+	return this.LaunchDpus(nil)
+}
+
+// LaunchDpus starts the kernel on the DPUs at the given indices, or on every
+// DPU when indices is nil, and leaves the others as they are. This is how a
+// host launches one rank of a set.
+func (this *Set) LaunchDpus(indices []int) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("uPIMulator: launching: %v", r)
 		}
 	}()
 
-	if this.Running() {
-		return errors.New("uPIMulator: the set is still running")
+	if indices == nil {
+		indices = make([]int, len(this.dpus))
+		for i := range indices {
+			indices[i] = i
+		}
 	}
 
-	for i := range this.dpus {
-		this.baseline[i] = this.statsOf(i)
+	for _, index := range indices {
+		if index < 0 || index >= len(this.dpus) {
+			return fmt.Errorf("uPIMulator: DPU index %d is out of range", index)
+		}
+
+		if this.dpuRunning(index) {
+			return fmt.Errorf("uPIMulator: DPU %d is still running", index)
+		}
 	}
 
-	this.sim.Host().Launch()
-	this.launched = true
+	for _, index := range indices {
+		this.baseline[index] = this.statsOf(index)
+	}
+
+	this.sim.Host().LaunchDpus(indices)
+
+	for _, index := range indices {
+		this.active[index] = true
+	}
 
 	return nil
 }
 
 // Running reports whether any DPU still has work in flight.
 func (this *Set) Running() bool {
-	if !this.launched {
-		return false
+	for index := range this.dpus {
+		if this.dpuRunning(index) {
+			return true
+		}
 	}
 
-	return !this.sim.Host().IsZombie()
+	return false
+}
+
+// dpuRunning reports whether one DPU was launched and has not finished. A DPU
+// no launch has started is idle, whatever state its threads are in.
+func (this *Set) dpuRunning(index int) bool {
+	return this.active[index] && !this.dpus[index].IsZombie()
 }
 
 // Step advances the machine by one DPU logic cycle.
@@ -501,7 +581,12 @@ func (this *Set) Step() (err error) {
 // max_cycles guards against a kernel that never finishes, which would otherwise
 // hang the host process; pass 0 for no limit.
 func (this *Set) Run(max_cycles int64) (cycles int64, err error) {
-	if !this.launched {
+	launched := false
+	for _, active := range this.active {
+		launched = launched || active
+	}
+
+	if !launched {
 		return 0, errors.New("uPIMulator: nothing has been launched")
 	}
 
@@ -580,9 +665,10 @@ func (this *Set) checkIdle(dpu_index int) error {
 
 	// Reading or writing MRAM flushes the memory controller, which fails while
 	// requests are outstanding. Report that as an error rather than let the
-	// core panic deep inside a transfer.
-	if this.Running() {
-		return errors.New("uPIMulator: the set is running; wait for it before touching memory")
+	// core panic deep inside a transfer. Only this DPU matters: the DPUs share
+	// nothing, so a host may write to one rank while another runs.
+	if this.dpuRunning(dpu_index) {
+		return fmt.Errorf("uPIMulator: DPU %d is running; wait for it before touching its memory", dpu_index)
 	}
 
 	return nil

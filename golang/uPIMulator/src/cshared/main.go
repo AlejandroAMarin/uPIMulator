@@ -106,6 +106,9 @@ func upim_set_create(program_dir *C.char, num_dpus C.int, num_tasklets C.int) C.
 	envMbps("UPIM_RANK_READ_MBPS", &config.RankReadMbps)
 	envMbps("UPIM_TRANSFER_SETUP_NS", &config.TransferSetupNs)
 	envMbps("UPIM_TRANSFER_FIRST_NS", &config.TransferFirstNs)
+	envMbps("UPIM_TRANSFER_RANK_SETUP_NS", &config.TransferRankSetupNs)
+	envMbps("UPIM_HOST_WRITE_MBPS", &config.HostWriteMbps)
+	envMbps("UPIM_HOST_READ_MBPS", &config.HostReadMbps)
 
 	// Memory timing, so the MRAM model can be refitted without rebuilding.
 	envMbps("UPIM_DMA_STARTUP_CYCLES", &config.DmaStartupCycles)
@@ -131,8 +134,9 @@ func upim_set_create(program_dir *C.char, num_dpus C.int, num_tasklets C.int) C.
 	envMbps("UPIM_T_RAS", &config.TRas)
 	envMbps("UPIM_T_RP", &config.TRp)
 
-	// One rank of the requested width. The simulator places no limit on how
-	// many DPUs a rank may hold.
+	// The DPUs share nothing while a kernel runs, so the simulator holds them
+	// as one rank of the requested width. The shim knows which rank of the
+	// machine each DPU belongs to and passes that to the transfer charge.
 	config.NumChannels = 1
 	config.NumRanksPerChannel = 1
 	config.NumDpusPerRank = int(num_dpus)
@@ -317,6 +321,29 @@ func upim_launch(handle C.int) C.int {
 	return 0
 }
 
+// upim_launch_dpus starts the kernel on count DPUs from first, and leaves the
+// others as they are. The shim calls it when a host launches one rank of a set.
+//
+//export upim_launch_dpus
+func upim_launch_dpus(handle C.int, first C.int, count C.int) C.int {
+	set, found := lookup(handle)
+
+	if !found {
+		return setError("no such set: %d", int(handle))
+	}
+
+	indices := make([]int, int(count))
+	for i := range indices {
+		indices[i] = int(first) + i
+	}
+
+	if err := set.LaunchDpus(indices); err != nil {
+		return setError("%v", err)
+	}
+
+	return 0
+}
+
 //export upim_running
 func upim_running(handle C.int) C.int {
 	set, found := lookup(handle)
@@ -352,19 +379,27 @@ func upim_run(handle C.int, max_cycles C.longlong) C.int {
 
 // upim_charge_transfer records the cost of a host transfer that has already
 // moved its data: num_dpus DPUs of bytes_per_dpu each, to the DPUs when to_dpu
-// is non-zero. The shim calls it once per dpu_push_xfer or dpu_copy_*, not once
+// is non-zero. The DPUs lie on num_ranks ranks, and the fullest of them holds
+// rank_dpus. The shim calls it once per dpu_push_xfer or dpu_copy_*, not once
 // per DPU, because the DPUs of a rank transfer together and charging each
 // separately would serialise what the hardware overlaps.
 //
 //export upim_charge_transfer
-func upim_charge_transfer(handle C.int, num_dpus C.int, bytes_per_dpu C.longlong, to_dpu C.int) C.int {
+func upim_charge_transfer(
+	handle C.int,
+	num_dpus C.int,
+	num_ranks C.int,
+	rank_dpus C.int,
+	bytes_per_dpu C.longlong,
+	to_dpu C.int,
+) C.int {
 	set, found := lookup(handle)
 
 	if !found {
 		return setError("no such set: %d", int(handle))
 	}
 
-	set.ChargeTransfer(int(num_dpus), int64(bytes_per_dpu), to_dpu != 0)
+	set.ChargeTransfer(int(num_dpus), int(num_ranks), int(rank_dpus), int64(bytes_per_dpu), to_dpu != 0)
 
 	return 0
 }

@@ -17,6 +17,8 @@
  *   UPIM_NUM_DPUS       DPU count to use when the program asks for
  *                       DPU_ALLOCATE_ALL
  *   UPIM_MAX_CYCLES     per-launch cycle cap; 0 means no limit
+ *   UPIM_DPUS_PER_RANK  DPUs a rank holds, 64 by default as on the machine;
+ *                       dpu_alloc spreads a set over ranks as libdpu does
  *   UPIM_VERBOSE        1 to trace each intercepted call on stderr
  */
 
@@ -38,12 +40,27 @@ typedef struct {
     uint32_t index;
 } shim_dpu_t;
 
+/* One rank of a set: the DPUs from first to first + count - 1. */
+typedef struct {
+    struct shim_set *set;
+    uint32_t index;
+    uint32_t first;
+    uint32_t count;
+} shim_rank_t;
+
 struct shim_set {
     int handle; /* -1 until dpu_load when the kernel is the host's ELF */
     uint32_t nr_dpus;
     long num_tasklets;
 
     shim_dpu_t *dpus;
+
+    /* The ranks, in DPU order, and a pointer to each for dpu_set_t.list,
+     * which the host may walk with DPU_RANK_FOREACH. */
+    uint32_t nr_ranks;
+    shim_rank_t *ranks;
+    struct dpu_rank_t **rank_list;
+    uint32_t *rank_of; /* the rank of each DPU */
 
     /* One staged buffer per DPU, filled by dpu_prepare_xfer and consumed by the
      * next dpu_push_xfer. */
@@ -93,20 +110,27 @@ static long env_long(const char *name, long fallback)
 
 /* ------------------------------------------------------------- set glue --- */
 
-/* A whole set is carried in the rank arm of the union, a single DPU in the dpu
- * arm. Both hold pointers we allocated, so the host may copy dpu_set_t values
- * around freely, which it does: every one of these calls takes it by value. */
+/* A set, or a rank of it, is carried in the rank arm of the union, a single
+ * DPU in the dpu arm. Both hold pointers we allocated, so the host may copy
+ * dpu_set_t values around freely, which it does: every one of these calls
+ * takes it by value. list.ranks points into the set's rank_list, so a rank is
+ * the same structure with nr_ranks 1. */
 
-static struct dpu_set_t set_of(struct shim_set *set)
+static struct dpu_set_t set_of_ranks(struct shim_set *set, uint32_t first_rank, uint32_t nr_ranks)
 {
     struct dpu_set_t dpu_set;
 
     memset(&dpu_set, 0, sizeof(dpu_set));
     dpu_set.kind = DPU_SET_RANKS;
-    dpu_set.list.nr_ranks = 1;
-    dpu_set.list.ranks = (struct dpu_rank_t **)set;
+    dpu_set.list.nr_ranks = nr_ranks;
+    dpu_set.list.ranks = &set->rank_list[first_rank];
 
     return dpu_set;
+}
+
+static struct dpu_set_t set_of(struct shim_set *set)
+{
+    return set_of_ranks(set, 0, set->nr_ranks);
 }
 
 static struct dpu_set_t set_of_dpu(struct shim_set *set, uint32_t index)
@@ -123,29 +147,142 @@ static struct dpu_set_t set_of_dpu(struct shim_set *set, uint32_t index)
 static struct shim_set *shim_set_of(struct dpu_set_t dpu_set)
 {
     if (dpu_set.kind == DPU_SET_RANKS) {
-        return (struct shim_set *)dpu_set.list.ranks;
+        if (dpu_set.list.nr_ranks == 0 || dpu_set.list.ranks == NULL) {
+            return NULL;
+        }
+        return ((shim_rank_t *)dpu_set.list.ranks[0])->set;
     }
 
     shim_dpu_t *dpu = (shim_dpu_t *)dpu_set.dpu;
     return dpu ? dpu->set : NULL;
 }
 
-/* dpu_index_of returns the DPU a set refers to, or -1 when it covers them all. */
-static int dpu_index_of(struct dpu_set_t dpu_set)
+/* range_of gives the DPUs a set covers: a single DPU, one rank, or all of
+ * them. The ranks of a set lie in DPU order, so this is always a range. */
+static void range_of(struct dpu_set_t dpu_set, uint32_t *first, uint32_t *count)
 {
     if (dpu_set.kind == DPU_SET_DPU) {
         shim_dpu_t *dpu = (shim_dpu_t *)dpu_set.dpu;
-        return dpu ? (int)dpu->index : -1;
+        *first = dpu ? dpu->index : 0;
+        *count = dpu ? 1 : 0;
+        return;
     }
 
-    return -1;
+    if (dpu_set.list.nr_ranks == 0 || dpu_set.list.ranks == NULL) {
+        *first = 0;
+        *count = 0;
+        return;
+    }
+
+    shim_rank_t *low = (shim_rank_t *)dpu_set.list.ranks[0];
+    shim_rank_t *high = (shim_rank_t *)dpu_set.list.ranks[dpu_set.list.nr_ranks - 1];
+    *first = low->first;
+    *count = high->first + high->count - low->first;
+}
+
+static int is_whole_set(struct shim_set *set, struct dpu_set_t dpu_set)
+{
+    uint32_t first, count;
+    range_of(dpu_set, &first, &count);
+    return first == 0 && count == set->nr_dpus;
+}
+
+/* lay_out_ranks spreads the DPUs over ranks as libdpu does on the machine.
+ * A set of N DPUs takes ceil(N / 64) ranks, and its DPUs are dealt one at a
+ * time over the 8 control interfaces of every rank, rank by rank: 199 DPUs lie
+ * 55, 48, 48, 48 and 65 lie 33, 32. runner/tests/perf/rank_host.c measured this
+ * for sets of 1 to 2560 DPUs. */
+static int lay_out_ranks(struct shim_set *set)
+{
+    uint32_t per_rank = (uint32_t)env_long("UPIM_DPUS_PER_RANK", 64);
+    uint32_t cis = per_rank < 8 ? per_rank : 8;
+
+    if (per_rank == 0) {
+        per_rank = 64;
+        cis = 8;
+    }
+
+    set->nr_ranks = set->nr_dpus == 0 ? 1 : (set->nr_dpus + per_rank - 1) / per_rank;
+    set->ranks = calloc(set->nr_ranks, sizeof(*set->ranks));
+    set->rank_list = calloc(set->nr_ranks, sizeof(*set->rank_list));
+    set->rank_of = calloc(set->nr_dpus ? set->nr_dpus : 1, sizeof(*set->rank_of));
+
+    if (set->ranks == NULL || set->rank_list == NULL || set->rank_of == NULL) {
+        return -1;
+    }
+
+    uint32_t total_cis = set->nr_ranks * cis;
+    uint32_t base = set->nr_dpus / total_cis, extra = set->nr_dpus % total_cis;
+    uint32_t next = 0;
+
+    for (uint32_t r = 0; r < set->nr_ranks; r++) {
+        uint32_t count = 0;
+
+        for (uint32_t c = r * cis; c < (r + 1) * cis; c++) {
+            count += base + (c < extra ? 1 : 0);
+        }
+
+        set->ranks[r].set = set;
+        set->ranks[r].index = r;
+        set->ranks[r].first = next;
+        set->ranks[r].count = count;
+        set->rank_list[r] = (struct dpu_rank_t *)&set->ranks[r];
+
+        for (uint32_t i = next; i < next + count; i++) {
+            set->rank_of[i] = r;
+        }
+        next += count;
+    }
+
+    return 0;
 }
 
 static void free_set(struct shim_set *set)
 {
     free(set->dpus);
     free(set->xfer);
+    free(set->ranks);
+    free(set->rank_list);
+    free(set->rank_of);
     free(set);
+}
+
+/* charge records what a transfer costs. It covers the DPUs from first to
+ * first + count - 1, or only those with a staged buffer when staged is given,
+ * and tells the model how many ranks they lie on and how full the fullest is:
+ * ranks move their data in parallel, the DPUs of one rank share it. */
+static void charge(struct shim_set *set, uint32_t first, uint32_t count, void *const *staged, size_t length,
+    int to_dpu)
+{
+    uint32_t *per_rank = calloc(set->nr_ranks, sizeof(*per_rank));
+    uint32_t dpus = 0, ranks = 0, fullest = 0;
+
+    if (per_rank == NULL) {
+        return;
+    }
+
+    for (uint32_t i = first; i < first + count; i++) {
+        if (staged != NULL && staged[i] == NULL) {
+            continue;
+        }
+        per_rank[set->rank_of[i]]++;
+        dpus++;
+    }
+
+    for (uint32_t r = 0; r < set->nr_ranks; r++) {
+        if (per_rank[r] == 0) {
+            continue;
+        }
+        ranks++;
+        if (per_rank[r] > fullest) {
+            fullest = per_rank[r];
+        }
+    }
+    free(per_rank);
+
+    if (dpus > 0) {
+        upim_charge_transfer(set->handle, (int)dpus, (int)ranks, (int)fullest, (long long)length, to_dpu);
+    }
 }
 
 /* ------------------------------------------------------- allocate / free --- */
@@ -195,7 +332,7 @@ dpu_error_t dpu_alloc(uint32_t nr_dpus, const char *profile, struct dpu_set_t *d
     set->dpus = calloc(nr_dpus, sizeof(*set->dpus));
     set->xfer = calloc(nr_dpus, sizeof(*set->xfer));
 
-    if (set->dpus == NULL || set->xfer == NULL) {
+    if (set->dpus == NULL || set->xfer == NULL || lay_out_ranks(set) != 0) {
         upim_set_free(set->handle);
         free_set(set);
         return DPU_ERR_SYSTEM;
@@ -208,16 +345,18 @@ dpu_error_t dpu_alloc(uint32_t nr_dpus, const char *profile, struct dpu_set_t *d
 
     *dpu_set = set_of(set);
 
-    trace("dpu_alloc: %u DPUs, %ld tasklets, program %s", nr_dpus, num_tasklets,
+    trace("dpu_alloc: %u DPUs on %u ranks, %ld tasklets, program %s", nr_dpus, set->nr_ranks, num_tasklets,
           program_dir != NULL ? program_dir : "(the ELF given to dpu_load)");
+    for (uint32_t r = 0; r < set->nr_ranks; r++) {
+        trace("  rank %u: DPUs %u to %u", r, set->ranks[r].first, set->ranks[r].first + set->ranks[r].count - 1);
+    }
     return DPU_OK;
 }
 
 dpu_error_t dpu_alloc_ranks(uint32_t nr_ranks, const char *profile, struct dpu_set_t *dpu_set)
 {
-    /* A simulated rank holds whatever width was asked for, so rank granularity
-     * is not meaningful here. Treat it as a DPU count. */
-    return dpu_alloc(nr_ranks, profile, dpu_set);
+    /* Whole ranks, as on a machine where every DPU works. */
+    return dpu_alloc(nr_ranks * (uint32_t)env_long("UPIM_DPUS_PER_RANK", 64), profile, dpu_set);
 }
 
 /* report_stats prints the per-DPU counters the study compares against hardware.
@@ -287,6 +426,11 @@ dpu_error_t dpu_free(struct dpu_set_t dpu_set)
         return DPU_ERR_INTERNAL;
     }
 
+    /* libdpu frees a whole set, never one rank or DPU of it. */
+    if (!is_whole_set(set, dpu_set)) {
+        return fail(DPU_ERR_INVALID_DPU_SET, "dpu_free of part of a set");
+    }
+
     trace("dpu_free");
 
     /* A set the host never loaded has nothing in the simulator to free. */
@@ -323,14 +467,18 @@ dpu_error_t dpu_get_nr_dpus(struct dpu_set_t dpu_set, uint32_t *nr_dpus)
         return DPU_ERR_INTERNAL;
     }
 
-    *nr_dpus = (dpu_set.kind == DPU_SET_DPU) ? 1 : set->nr_dpus;
+    uint32_t first;
+    range_of(dpu_set, &first, nr_dpus);
     return DPU_OK;
 }
 
 dpu_error_t dpu_get_nr_ranks(struct dpu_set_t dpu_set, uint32_t *nr_ranks)
 {
-    (void)dpu_set;
-    *nr_ranks = 1;
+    if (shim_set_of(dpu_set) == NULL) {
+        return DPU_ERR_INTERNAL;
+    }
+
+    *nr_ranks = (dpu_set.kind == DPU_SET_DPU) ? 1 : dpu_set.list.nr_ranks;
     return DPU_OK;
 }
 
@@ -368,6 +516,12 @@ dpu_error_t dpu_load(struct dpu_set_t dpu_set, const char *binary_path, struct d
         return DPU_ERR_INVALID_DPU_SET;
     }
 
+    /* The simulated set holds one program. A host that loads one rank with
+     * another kernel needs a set per kernel. */
+    if (!is_whole_set(set, dpu_set)) {
+        return fail(DPU_ERR_INVALID_DPU_SET, "dpu_load of part of a set (one program per set is supported)");
+    }
+
     if (set->handle >= 0) {
         upim_set_free(set->handle);
         set->handle = -1;
@@ -394,24 +548,22 @@ struct dpu_set_dpu_iterator_t dpu_set_dpu_iterator_from(struct dpu_set_t *set)
     iterator.rank_iterator.set = set;
 
     struct shim_set *shim = set ? shim_set_of(*set) : NULL;
+    uint32_t first = 0, count = 0;
 
-    if (shim == NULL || shim->nr_dpus == 0) {
+    if (shim != NULL) {
+        range_of(*set, &first, &count);
+    }
+
+    if (count == 0) {
         iterator.has_next = false;
         return iterator;
     }
 
-    /* A single-DPU set iterates over just itself. */
-    if (set->kind == DPU_SET_DPU) {
-        iterator.count = 0;
-        iterator.next_idx = (uint32_t)dpu_index_of(*set);
-        iterator.next = *set;
-        iterator.has_next = true;
-        return iterator;
-    }
-
+    /* count numbers the DPUs of this set from 0, as DPU_FOREACH(set, dpu, i)
+     * does on the machine for a rank as for a whole set. */
     iterator.count = 0;
-    iterator.next_idx = 0;
-    iterator.next = set_of_dpu(shim, 0);
+    iterator.next_idx = first;
+    iterator.next = set->kind == DPU_SET_DPU ? *set : set_of_dpu(shim, first);
     iterator.has_next = true;
 
     return iterator;
@@ -421,24 +573,28 @@ void dpu_set_dpu_iterator_next(struct dpu_set_dpu_iterator_t *iterator)
 {
     struct dpu_set_t *set = iterator->rank_iterator.set;
     struct shim_set *shim = set ? shim_set_of(*set) : NULL;
+    uint32_t first = 0, count = 0;
 
     if (shim == NULL || set->kind == DPU_SET_DPU) {
         iterator->has_next = false;
         return;
     }
 
+    range_of(*set, &first, &count);
     iterator->next_idx++;
 
-    if (iterator->next_idx >= shim->nr_dpus) {
+    if (iterator->next_idx >= first + count) {
         iterator->has_next = false;
         return;
     }
 
-    iterator->count = iterator->next_idx;
+    iterator->count = iterator->next_idx - first;
     iterator->next = set_of_dpu(shim, iterator->next_idx);
     iterator->has_next = true;
 }
 
+/* The rank iterator yields each rank of the set as a set of its own. A single
+ * DPU is its own only rank. */
 struct dpu_set_rank_iterator_t dpu_set_rank_iterator_from(struct dpu_set_t *set)
 {
     struct dpu_set_rank_iterator_t iterator;
@@ -448,18 +604,43 @@ struct dpu_set_rank_iterator_t dpu_set_rank_iterator_from(struct dpu_set_t *set)
     iterator.count = 0;
     iterator.next_idx = 0;
 
-    if (set != NULL) {
-        iterator.next = *set;
-        iterator.has_next = true;
+    struct shim_set *shim = set ? shim_set_of(*set) : NULL;
+
+    if (shim == NULL) {
+        iterator.has_next = false;
+        return iterator;
     }
+
+    if (set->kind == DPU_SET_DPU) {
+        iterator.next = *set;
+    } else {
+        iterator.next = set_of_ranks(shim, ((shim_rank_t *)set->list.ranks[0])->index, 1);
+    }
+    iterator.has_next = true;
 
     return iterator;
 }
 
 void dpu_set_rank_iterator_next(struct dpu_set_rank_iterator_t *iterator)
 {
-    /* One simulated rank holds every DPU, so the walk ends after the first. */
-    iterator->has_next = false;
+    struct dpu_set_t *set = iterator->set;
+    struct shim_set *shim = set ? shim_set_of(*set) : NULL;
+
+    if (shim == NULL || set->kind == DPU_SET_DPU) {
+        iterator->has_next = false;
+        return;
+    }
+
+    iterator->next_idx++;
+
+    if (iterator->next_idx >= set->list.nr_ranks) {
+        iterator->has_next = false;
+        return;
+    }
+
+    iterator->count = iterator->next_idx;
+    iterator->next = set_of_ranks(shim, ((shim_rank_t *)set->list.ranks[iterator->next_idx])->index, 1);
+    iterator->has_next = true;
 }
 
 /* ------------------------------------------------------------ transfers --- */
@@ -584,36 +765,26 @@ dpu_error_t dpu_copy_to(
         return DPU_ERR_INTERNAL;
     }
 
-    int index = dpu_index_of(dpu_set);
+    uint32_t first, count;
+    range_of(dpu_set, &first, &count);
 
-    trace("dpu_copy_to: %s+%u, %zu bytes, dpu %d", symbol_name, symbol_offset, length, index);
+    trace("dpu_copy_to: %s+%u, %zu bytes, dpus %u to %u", symbol_name, symbol_offset, length, first,
+        first + count - 1);
 
-    /* A whole-set copy broadcasts the same bytes to every DPU. */
-    if (index < 0) {
-        for (uint32_t i = 0; i < set->nr_dpus; i++) {
-            dpu_error_t status = copy_one(set, i, symbol_name, symbol_offset, (void *)src, length, 1);
+    /* A copy to more than one DPU, a rank or the whole set, broadcasts the
+     * same bytes to each. */
+    for (uint32_t i = first; i < first + count; i++) {
+        dpu_error_t status = copy_one(set, i, symbol_name, symbol_offset, (void *)src, length, 1);
 
-            if (status != DPU_OK) {
-                return status;
-            }
+        if (status != DPU_OK) {
+            return status;
         }
-
-        /* One charge for the batch: the DPUs of a rank transfer together, and
-         * charging each in turn would serialise what the hardware overlaps. */
-        upim_charge_transfer(set->handle, (int)set->nr_dpus, (long long)length, 1);
-        return DPU_OK;
     }
 
-    {
-        dpu_error_t status
-            = copy_one(set, (uint32_t)index, symbol_name, symbol_offset, (void *)src, length, 1);
-
-        if (status == DPU_OK) {
-            upim_charge_transfer(set->handle, 1, (long long)length, 1);
-        }
-
-        return status;
-    }
+    /* One charge for the batch: the DPUs of a rank transfer together, and
+     * charging each in turn would serialise what the hardware overlaps. */
+    charge(set, first, count, NULL, length, 1);
+    return DPU_OK;
 }
 
 dpu_error_t dpu_copy_from(
@@ -625,18 +796,18 @@ dpu_error_t dpu_copy_from(
         return DPU_ERR_INTERNAL;
     }
 
-    int index = dpu_index_of(dpu_set);
+    uint32_t first, count;
+    range_of(dpu_set, &first, &count);
 
-    trace("dpu_copy_from: %s+%u, %zu bytes, dpu %d", symbol_name, symbol_offset, length, index);
+    trace("dpu_copy_from: %s+%u, %zu bytes, dpu %u", symbol_name, symbol_offset, length, first);
 
-    /* Reading a whole set into one buffer is ambiguous, so take DPU 0, which is
-     * what the hardware library does for a single-buffer read. */
+    /* Reading several DPUs into one buffer is ambiguous, so take the first,
+     * which is what the hardware library does for a single-buffer read. */
     {
-        dpu_error_t status = copy_one(
-            set, index < 0 ? 0 : (uint32_t)index, symbol_name, symbol_offset, dst, length, 0);
+        dpu_error_t status = copy_one(set, first, symbol_name, symbol_offset, dst, length, 0);
 
         if (status == DPU_OK) {
-            upim_charge_transfer(set->handle, 1, (long long)length, 0);
+            charge(set, first, 1, NULL, length, 0);
         }
 
         return status;
@@ -651,19 +822,15 @@ dpu_error_t dpu_prepare_xfer(struct dpu_set_t dpu_set, void *buffer)
         return DPU_ERR_INTERNAL;
     }
 
-    int index = dpu_index_of(dpu_set);
+    uint32_t first, count;
+    range_of(dpu_set, &first, &count);
 
-    if (index < 0) {
-        /* Staging one buffer for the whole set means every DPU reads the same
-         * host memory. */
-        for (uint32_t i = 0; i < set->nr_dpus; i++) {
-            set->xfer[i] = buffer;
-        }
-
-        return DPU_OK;
+    /* Staging one buffer for several DPUs means each reads the same host
+     * memory. */
+    for (uint32_t i = first; i < first + count; i++) {
+        set->xfer[i] = buffer;
     }
 
-    set->xfer[index] = buffer;
     return DPU_OK;
 }
 
@@ -685,9 +852,12 @@ dpu_error_t dpu_push_xfer(struct dpu_set_t dpu_set,
     trace("dpu_push_xfer: %s %s+%u, %zu bytes",
         xfer == DPU_XFER_TO_DPU ? "to" : "from", symbol_name, symbol_offset, length);
 
-    uint32_t staged = 0;
+    uint32_t first, count;
+    range_of(dpu_set, &first, &count);
 
-    for (uint32_t i = 0; i < set->nr_dpus; i++) {
+    /* A push moves the staged buffers of the DPUs in this set only: a host
+     * may push to one rank and leave what it staged for another. */
+    for (uint32_t i = first; i < first + count; i++) {
         if (set->xfer[i] == NULL) {
             continue;
         }
@@ -698,20 +868,18 @@ dpu_error_t dpu_push_xfer(struct dpu_set_t dpu_set,
         if (status != DPU_OK) {
             return status;
         }
-
-        staged++;
     }
 
     /* One charge for the whole push. This is the bulk path, and the DPUs of a
      * rank move their data at the same time; charging per DPU would report a
      * rank as slow as a single DPU repeated. */
-    upim_charge_transfer(set->handle, (int)staged, (long long)length, xfer == DPU_XFER_TO_DPU);
+    charge(set, first, count, set->xfer, length, xfer == DPU_XFER_TO_DPU);
 
     /* When tracing a read, report how much of it was non-zero. An all-zero
      * result usually means the kernel wrote somewhere else, which is otherwise
      * very hard to tell apart from a transfer that simply failed. */
     if (verbose && xfer == DPU_XFER_FROM_DPU) {
-        for (uint32_t i = 0; i < set->nr_dpus; i++) {
+        for (uint32_t i = first; i < first + count; i++) {
             if (set->xfer[i] == NULL) {
                 continue;
             }
@@ -730,7 +898,7 @@ dpu_error_t dpu_push_xfer(struct dpu_set_t dpu_set,
     }
 
     /* Staged buffers apply to one push only. */
-    memset(set->xfer, 0, set->nr_dpus * sizeof(*set->xfer));
+    memset(set->xfer + first, 0, count * sizeof(*set->xfer));
 
     return DPU_OK;
 }
@@ -770,11 +938,20 @@ dpu_error_t dpu_launch(struct dpu_set_t dpu_set, dpu_launch_policy_t policy)
         return DPU_ERR_INTERNAL;
     }
 
-    trace("dpu_launch: %s", policy == DPU_SYNCHRONOUS ? "synchronous" : "asynchronous");
+    uint32_t first, count;
+    range_of(dpu_set, &first, &count);
 
-    record_launch(0, set->nr_dpus);
+    trace("dpu_launch: %s, dpus %u to %u", policy == DPU_SYNCHRONOUS ? "synchronous" : "asynchronous", first,
+        first + count - 1);
 
-    if (upim_launch(set->handle) != 0) {
+    record_launch(first, count);
+
+    /* A launch of one rank starts its DPUs only. The others go on as they
+     * were, so a host may launch rank by rank and wait for the whole set. */
+    int rc = is_whole_set(set, dpu_set) ? upim_launch(set->handle)
+                                        : upim_launch_dpus(set->handle, (int)first, (int)count);
+
+    if (rc != 0) {
         return fail(DPU_ERR_INTERNAL, "dpu_launch");
     }
 
@@ -872,8 +1049,11 @@ dpu_error_t dpu_log_read(struct dpu_set_t dpu_set, FILE *stream)
         return DPU_OK;
     }
 
-    int first = (dpu_set.kind == DPU_SET_DPU) ? dpu_index_of(dpu_set) : 0;
-    int last = (dpu_set.kind == DPU_SET_DPU) ? first + 1 : (int)set->nr_dpus;
+    uint32_t range_first, range_count;
+    range_of(dpu_set, &range_first, &range_count);
+
+    int first = (int)range_first;
+    int last = (int)(range_first + range_count);
 
     for (int i = first; i < last; i++) {
         /* struct { uint32_t wp; uint32_t has_wrapped; } */

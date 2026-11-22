@@ -25,6 +25,13 @@ dpu_set_dpu_iterator_next    # DPU_FOREACH expands to these two
 
 # --- compiled out of the current binaries, required by builds we need ---
 dpu_copy_from                # read a named symbol; PERF=1 uses it for PERF_ACC
+
+# --- sets that span ranks (runner/tests/perf/rank_host.c uses all four) ---
+dpu_alloc_ranks              # allocate whole ranks of 64 DPUs
+dpu_get_nr_ranks             # how many ranks a set spans
+dpu_set_rank_iterator_from   # DPU_RANK_FOREACH expands to these two
+dpu_set_rank_iterator_next   # DPU_RANK_FOREACH expands to these two
+dpu_broadcast_to             # the same bytes to every DPU of a set
 # dpu_probe_* is deliberately absent: SDK 2025.1.0 does not define those
 # symbols at all (nm shows none in libdpu, and no header declares them), so a
 # build that referenced them could not link against the real library either.

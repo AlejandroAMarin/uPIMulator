@@ -668,6 +668,27 @@ accepted: the machine's refresh does not keep a fixed clock, and a read costs
 a thread about two cycles more when other threads compete than when it is
 alone. They change the time, not the results.
 
+## 2026-10-03 — Sets that span ranks
+
+A set of more than 64 DPUs takes several ranks on the machine. The simulator
+put them all on one, so a program that asked how many ranks it had got the
+wrong answer, and a transfer to 1024 DPUs was charged as if one rank carried
+it. A new test program measured how the machine spreads a set: ceil(N / 64)
+ranks, as even as the ranks' control interfaces allow, so 199 DPUs lie 55,
+48, 48, 48. The simulator now spreads them the same way, and a copy, a push
+or a launch can take one rank. The same test program gives the same output
+on both sides.
+
+Transfers over several ranks were measured too. The ranks work in parallel,
+but the host serves all of them and starts them one after another, so the
+model now has a setup per rank and a host-wide limit.
+
+**Result:** kernel times do not depend on the ranks, on either side (BIMSA
+-0.23% to -0.32% from 64 to 256 DPUs; GIMSA on 4 ranks unchanged, 2000 of
+2000). Transfers over 2 to 16 ranks are 33% rms from the machine, from 63%.
+Ranks that share a memory channel, broadcasts and the time of a launch are
+not modelled.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.

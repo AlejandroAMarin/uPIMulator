@@ -24,6 +24,10 @@
 #   --max-cycles N      abort a launch after N cycles (0 = no limit)
 #   --verbose           trace every intercepted call
 #   --trace-hardware    also run under strace and fail on any rank access
+#
+# A set of more than 64 DPUs spans ranks as on the machine: ceil(N / 64) of
+# them, the DPUs spread as libdpu spreads them. UPIM_DPUS_PER_RANK changes the
+# width of a rank.
 
 set -u
 
