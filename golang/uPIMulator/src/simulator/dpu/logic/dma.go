@@ -39,6 +39,15 @@ type Dma struct {
 	// as long as for a read, less the slot a read spends when it completes.
 	write_startup int64
 	write_ack     int64
+
+	// turnaround is what the engine pays when a transfer goes the other way
+	// from the one before it, a read after a write or a write after a read.
+	// A stream of reads alone or of writes alone never pays it. last_op is
+	// the direction of the transfer handed to the controller last.
+	turnaround  int64
+	last_op     dram.MemoryOperation
+	has_last_op bool
+	switch_paid bool
 }
 
 func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
@@ -62,6 +71,9 @@ func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
 	this.tail_per_kb = command_line_parser.IntParameter("dma_tail_cycles_per_kb")
 	this.write_startup = command_line_parser.IntParameter("dma_write_startup_cycles")
 	this.write_ack = command_line_parser.IntParameter("dma_write_ack_cycles")
+	this.turnaround = command_line_parser.IntParameter("dma_turnaround_cycles")
+	this.has_last_op = false
+	this.switch_paid = false
 	this.busy = 0
 
 	this.input_q = new(dram.DmaCommandQ)
@@ -263,18 +275,38 @@ func (this *Dma) Cycle() {
 	if this.busy > 0 {
 		this.busy--
 	} else if this.memory_controller.IsEmpty() {
-		this.input_q.Cycle()
+		if this.NeedsTurnaround() {
+			this.busy = this.turnaround
+			this.switch_paid = true
+		} else {
+			this.input_q.Cycle()
+		}
 	}
 
 	this.ready_q.CycleAll()
 }
 
 func (this *Dma) ServiceInputQ() {
-	if this.input_q.CanPop(1) && this.busy == 0 &&
+	if this.input_q.CanPop(1) && this.busy == 0 && !this.NeedsTurnaround() &&
 		this.memory_controller.IsEmpty() && this.memory_controller.CanPush() {
 		dma_command := this.input_q.Pop()
 		this.memory_controller.Push(dma_command)
+
+		this.last_op = dma_command.MemoryOperation()
+		this.has_last_op = true
+		this.switch_paid = false
 	}
+}
+
+// NeedsTurnaround says whether the transfer at the front goes the other way
+// from the last one and has not paid for that yet.
+func (this *Dma) NeedsTurnaround() bool {
+	if this.turnaround <= 0 || !this.has_last_op || this.switch_paid || this.input_q.IsEmpty() {
+		return false
+	}
+
+	dma_command, _ := this.input_q.Front(0)
+	return dma_command.MemoryOperation() != this.last_op
 }
 
 func (this *Dma) ServiceReadyQ() {

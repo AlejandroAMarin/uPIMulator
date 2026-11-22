@@ -111,6 +111,7 @@ func upim_set_create(program_dir *C.char, num_dpus C.int, num_tasklets C.int) C.
 	envMbps("UPIM_DMA_TAIL_CYCLES_PER_KB", &config.DmaTailCyclesPerKb)
 	envMbps("UPIM_DMA_WRITE_STARTUP_CYCLES", &config.DmaWriteStartupCycles)
 	envMbps("UPIM_DMA_WRITE_ACK_CYCLES", &config.DmaWriteAckCycles)
+	envMbps("UPIM_DMA_TURNAROUND_CYCLES", &config.DmaTurnaroundCycles)
 	envMbps("UPIM_T_CL", &config.TCl)
 	envMbps("UPIM_T_BL", &config.TBl)
 	envMbps("UPIM_T_RCD", &config.TRcd)

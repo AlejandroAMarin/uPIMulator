@@ -72,6 +72,10 @@ type Config struct {
 	DmaWriteStartupCycles int
 	DmaWriteAckCycles     int
 
+	// What the engine pays when a transfer goes the other way from the one
+	// before it. Reads alone or writes alone never pay it.
+	DmaTurnaroundCycles int
+
 	ReadBandwidth  int
 	WriteBandwidth int
 
@@ -149,6 +153,7 @@ func DefaultConfig() Config {
 		DmaTailCyclesPerKb:    25,
 		DmaWriteStartupCycles: 24,
 		DmaWriteAckCycles:     9,
+		DmaTurnaroundCycles:   2,
 
 		ReadBandwidth:  1,
 		WriteBandwidth: 3,
@@ -606,6 +611,7 @@ func (this Config) toCommandLineParser() *misc.CommandLineParser {
 	add_int("dma_tail_cycles_per_kb", this.DmaTailCyclesPerKb)
 	add_int("dma_write_startup_cycles", this.DmaWriteStartupCycles)
 	add_int("dma_write_ack_cycles", this.DmaWriteAckCycles)
+	add_int("dma_turnaround_cycles", this.DmaTurnaroundCycles)
 	add_int("read_bandwidth", this.ReadBandwidth)
 	add_int("write_bandwidth", this.WriteBandwidth)
 

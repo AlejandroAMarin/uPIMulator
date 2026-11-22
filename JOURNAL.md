@@ -491,6 +491,24 @@ a flat 1.6% error that the old model could not express, is inside 0.8%. One
 number got worse: GIMSA's table lookup, from +0.2% to -1.2%. That is the next
 thing to look at.
 
+## 2026-09-28 — Reads and writes together
+
+GIMSA's table lookup got worse when the write costs were fitted, although the
+lookup itself writes nothing. It reads large blocks while the other threads
+write their results, and all of them share one memory engine. So the error
+had to be in how reads and writes share it.
+
+A probe that does a read and then a write, over and over, showed a cost that
+neither reads alone nor writes alone have: about 2.4 cycles each time the
+engine changes direction. Memory buses often have such a turnaround. The model
+now charges it. The same measurements showed that large reads under load were
+1% cheap, which a slightly higher busy rate fixes.
+
+The lookup is now 0.9% fast and the search 0.7% slow, while the two together
+are within 0.4%. They run at the same time on the same hardware, so how the
+time splits between them depends on everything else that is happening. BIMSA
+is inside 0.6% at every tasklet count and every section of it inside 0.5%.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.

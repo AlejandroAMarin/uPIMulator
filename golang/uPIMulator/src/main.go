@@ -196,6 +196,12 @@ func InitCommandLineParser() *misc.CommandLineParser {
 	)
 	command_line_parser.AddOption(
 		misc.INT,
+		"dma_turnaround_cycles",
+		"2",
+		"DPU DMA engine cost of a transfer that goes the other way from the one before it [logic cycle]",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
 		"dma_burst_size",
 		"1024",
 		"largest transfer the DPU DMA engine sets up in one go [byte]",
