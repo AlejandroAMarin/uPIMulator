@@ -772,21 +772,34 @@ dpu_error_t dpu_log_read(struct dpu_set_t dpu_set, FILE *stream)
 
 char *dpu_error_to_string(dpu_error_t status)
 {
+    /* The caller frees the string, as libdpu's DPU_CHECK does, so it must be
+     * allocated: a string literal here aborts every failing DPU_ASSERT. */
+    const char *text;
+
     switch (status) {
     case DPU_OK:
-        return (char *)"success";
+        text = "success";
+        break;
     case DPU_ERR_INTERNAL:
-        return (char *)"internal error (simulated)";
+        text = "internal error (simulated)";
+        break;
     case DPU_ERR_SYSTEM:
-        return (char *)"system error (simulated)";
+        text = "system error (simulated)";
+        break;
     case DPU_ERR_ALLOCATION:
-        return (char *)"cannot allocate the simulated DPUs";
+        text = "cannot allocate the simulated DPUs";
+        break;
     case DPU_ERR_INVALID_SYMBOL_ACCESS:
-        return (char *)"invalid symbol access (simulated)";
+        text = "invalid symbol access (simulated)";
+        break;
     case DPU_ERR_MRAM_BUSY:
-        return (char *)"DPU memory is busy (simulated)";
+        text = "DPU memory is busy (simulated)";
+        break;
     default:
-        return (char *)"unknown error (simulated)";
+        text = "unknown error (simulated)";
+        break;
     }
+
+    return strdup(text);
 }
 
