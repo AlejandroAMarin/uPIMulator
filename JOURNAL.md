@@ -703,6 +703,76 @@ in software, and kernels started two or three times in a row.
 and 16 threads. The times agree inside 1% at 32 of 33 points, and the worst is
 1.08% slow. The model was not changed for them.
 
+## 2026-10-06 — A reference for GIMSA, before the architecture changes
+
+The reference point to compare every later change of the simulated
+architecture against. GIMSA on both of its genomes, with three read lengths
+each: one replica, 12 tasklets, the `kernel_lut` mode, K = 22, the first
+50,000 reads of each 10M Illumina set (no `begintrunc` sets). Rice takes 199
+DPUs on 4 ranks, human 541 DPUs on 9 ranks.
+
+The time is the DPU kernel time. A counter wraps GIMSA's own kernel
+(`runner/tests/prim/probe_main.c`), and the host reads it after every
+launch, on the machine and in the simulator. A launch lasts as long as its
+slowest DPU, so the time is the sum over launches of the largest count,
+divided by the DPU clock, 350 MHz. The host's own timers are not used: in the
+simulator they measure the simulation. Host transfers are not included.
+Hardware: the median of 3 runs. The simulator gives the same count on every
+run.
+
+| set | reads | launches | hardware (ms) | uPIMulator (ms) | difference |
+|---|---|---|---|---|---|
+| rice L66  (SRR10724346) | 50,000 | 3 | 5.359  | 5.297  | -1.16% |
+| rice L88  (SRR10838753) | 50,000 | 4 | 7.001  | 6.906  | -1.35% |
+| rice L132 (SRR8241153)  | 50,000 | 6 | 28.103 | 27.697 | -1.44% |
+| human L66  (SRR622461)  | 50,000 | 3 | 4.199  | 4.112  | -2.09% |
+| human L88  (SRR622457)  | 50,000 | 4 | 14.608 | 14.318 | -1.98% |
+| human L132 (ERR2990063) | 50,000 | 6 | 8.529  | 8.378  | -1.76% |
+
+Difference = (uPIMulator - hardware) / hardware. In cycles:
+
+| set | hardware, median | hardware, min..max | uPIMulator |
+|---|---|---|---|
+| rice L66   | 1,875,680 | 1,873,216..1,877,280 | 1,854,000 |
+| rice L88   | 2,450,192 | 2,443,536..2,453,408 | 2,417,152 |
+| rice L132  | 9,835,968 | 9,834,816..9,845,584 | 9,694,000 |
+| human L66  | 1,469,696 | 1,467,328..1,472,400 | 1,439,040 |
+| human L88  | 5,112,800 | 5,108,336..5,114,080 | 5,011,312 |
+| human L132 | 2,985,008 | 2,981,920..2,988,768 | 2,932,352 |
+
+Every run, on both sides, verifies 50,000 of 50,000 reads against the
+unbounded oracle. The machine repeats to 0.4% or better, so every difference
+above is real.
+
+**Result: the simulator is 1.2% to 2.1% fast.** That is outside the 1%
+accepted on 2026-10-02, and inside the 3% accepted since 2026-10-07: valid,
+off target. The validated GIMSA run used 2000 reads, about 10 a DPU per
+launch, and was +0.5%. With 50,000 reads a DPU does about 250 a launch, and the
+error changes sign. It is a uniform offset, not a scheduling or a balance
+effect: the simulator picks the same slowest DPU as the machine in 25 of 26
+launches, and per DPU the error is -1.3% (rice) and -1.55% (human) at the
+median, -4% to +1.8% at the extremes. The human kernel uses 4 sub-LUT bits
+against 8 for rice and has larger partitions; the cause is not looked into.
+
+Simulator cost: rice 14 to 49 minutes and 28 GB a set, human 20 to 46
+minutes and 72 GB a set. The simulator's memory is mostly MRAM, which it
+holds in the Go heap. Without a limit the collector lets the heap grow to
+39 GB on rice. `GOMEMLIMIT` must sit above the live heap: at 16 GiB a human
+run (32 GB live) did nothing but collect garbage and finished no launch in
+3.5 hours. The script uses 16 GiB for rice and 40 GiB for human.
+
+To repeat it after a change (the slices and the builds are kept in
+`/tmp/upim-gimsa-ref`, and are made again if missing):
+
+    runner/tests/perf/gimsa_reference.sh                 # both sides, all six
+    SKIP_HW=1 runner/tests/perf/gimsa_reference.sh       # the simulator only
+
+The hosts and the probed kernels are built from the GIMSA tree into the work
+directory; GIMSA's `bin/` stays unchanged. Each slice's oracle goes next to
+the full one as
+`dataset/<db>_bitwise/groundtruth_unbounded/upimref_<set>_N50000_K22.intv.bin`,
+because the host finds it by the query file's name.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.
