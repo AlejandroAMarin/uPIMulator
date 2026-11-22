@@ -623,6 +623,30 @@ search compares like for like at last: its lookup phase is exact, and its
 search is 1.1% slow. That 1.1% is now a real model error, not two different
 programs.
 
+## 2026-09-30 — The order the threads take their turns in
+
+The machine runs up to 24 threads and gives each a turn in its pipeline. When
+several threads wait for one lock, the lock goes to the first thread whose turn
+comes after the release. So the order of the turns decides who works first.
+The simulator went round the threads by number. The machine does not.
+
+Two small tests read the machine's order through who gets a lock. The machine
+gives the same order on every run, so each difference is a model error. Three
+rules explain all 42 orders measured, from 3 to 16 threads:
+
+- **A thread that is started or woken gets its first turn 13 cycles later.**
+  Each thread starts the next one, so the threads spread over the pipeline two
+  cycles apart, not side by side.
+- **A thread that was just woken goes before every thread that waits.** When
+  a barrier wakes threads 1, 2 and 3 in turn, they take their turns as 3, 2, 1.
+- **Otherwise the thread that has waited longest goes first.**
+
+**Result:** the simulator now executes exactly the machine's number of
+instructions on the two PrIM kernels, at every thread count, because the
+threads now wait on the locks as often as on the machine. The vector addition
+at 16 threads went from 1.9% slow to inside the machine's own spread. The
+other workloads stay inside the same range as before.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.

@@ -232,6 +232,16 @@ func InitCommandLineParser() *misc.CommandLineParser {
 	)
 	command_line_parser.AddOption(
 		misc.INT,
+		"thread_policy",
+		"1",
+		"which ready thread issues: 0 round the threads by number, 1 the machine's order (a woken thread first, then the one ready the longest)",
+	)
+	command_line_parser.AddOption(misc.INT, "boot_delay_cycles", "13",
+		"cycles after a boot before the booted thread may issue (thread_policy 1)")
+	command_line_parser.AddOption(misc.INT, "resume_delay_cycles", "13",
+		"cycles after a resume before the resumed thread may issue (thread_policy 1)")
+	command_line_parser.AddOption(
+		misc.INT,
 		"dma_burst_size",
 		"1024",
 		"largest transfer the DPU DMA engine sets up in one go [byte]",

@@ -87,6 +87,13 @@ type Config struct {
 	// lowest-numbered thread's.
 	DmaPolicy int
 
+	// Which ready thread issues: 0 round the threads by number, 1 the
+	// machine's order. With 1, a booted or resumed thread issues this many
+	// cycles after the boot or resume.
+	ThreadPolicy      int
+	BootDelayCycles   int
+	ResumeDelayCycles int
+
 	ReadBandwidth  int
 	WriteBandwidth int
 
@@ -170,6 +177,9 @@ func DefaultConfig() Config {
 		MramRefreshInterval: 2736,
 		MramRefreshCycles:   120,
 		DmaPolicy:           0,
+		ThreadPolicy:        1,
+		BootDelayCycles:     13,
+		ResumeDelayCycles:   13,
 
 		ReadBandwidth:  1,
 		WriteBandwidth: 3,
@@ -633,6 +643,9 @@ func (this Config) toCommandLineParser() *misc.CommandLineParser {
 	add_int("mram_refresh_phase", this.MramRefreshPhase)
 	add_int("mram_refresh_mode", this.MramRefreshMode)
 	add_int("dma_policy", this.DmaPolicy)
+	add_int("thread_policy", this.ThreadPolicy)
+	add_int("boot_delay_cycles", this.BootDelayCycles)
+	add_int("resume_delay_cycles", this.ResumeDelayCycles)
 	add_int("read_bandwidth", this.ReadBandwidth)
 	add_int("write_bandwidth", this.WriteBandwidth)
 
