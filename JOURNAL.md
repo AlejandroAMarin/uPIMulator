@@ -689,6 +689,20 @@ model now has a setup per rank and a host-wide limit.
 Ranks that share a memory channel, broadcasts and the time of a launch are
 not modelled.
 
+## 2026-10-03 — Eleven more programs
+
+PrIM, the benchmark suite the simulator's authors validated against, has 13
+programs. Two were compared so far. The other eleven now run too, each with
+PrIM's own host program and its own unchanged kernel; a small wrapper around
+the kernel's entry point counts its cycles on both sides. They use what no
+earlier program used: locks shared by many threads, threads that hand
+partial results to each other, 64-bit sums, multiplication and division done
+in software, and kernels started two or three times in a row.
+
+**Result:** every program computed the right answer on both sides, at 1, 4
+and 16 threads. The times agree inside 1% at 32 of 33 points, and the worst is
+1.08% slow. The model was not changed for them.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.

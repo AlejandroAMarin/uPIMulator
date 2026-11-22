@@ -19,6 +19,9 @@
  *   UPIM_MAX_CYCLES     per-launch cycle cap; 0 means no limit
  *   UPIM_DPUS_PER_RANK  DPUs a rank holds, 64 by default as on the machine;
  *                       dpu_alloc spreads a set over ranks as libdpu does
+ *   PROBE_OUT           append each DPU's OUT_COUNT to this file after every
+ *                       launch, as runner/scripts/launch_probe.c does on the
+ *                       machine; PROBE_MODE is written to the DPUs first
  *   UPIM_VERBOSE        1 to trace each intercepted call on stderr
  */
 
@@ -67,6 +70,9 @@ struct shim_set {
     void **xfer;
 
     int launched;
+
+    /* The DPUs launched since the last wait, which PROBE_OUT reads. */
+    uint32_t probe_first, probe_count;
 };
 
 static int verbose;
@@ -916,6 +922,57 @@ dpu_error_t dpu_broadcast_to(struct dpu_set_t dpu_set,
 
 /* ---------------------------------------------------------------- run --- */
 
+/* PROBE_OUT and PROBE_MODE do in the simulator what runner/scripts/
+ * launch_probe.c does on the machine, for a kernel built with
+ * runner/tests/prim/probe_main.c: PROBE_MODE goes to the DPUs before a launch,
+ * and each DPU's OUT_COUNT is appended to PROBE_OUT after it, one line per
+ * DPU: the launch number, the DPU index, the count. These copies are not
+ * charged as transfers. */
+static void probe_write_mode(struct shim_set *set, uint32_t first, uint32_t count)
+{
+    const char *mode_text = getenv("PROBE_MODE");
+
+    if (getenv("PROBE_OUT") == NULL || mode_text == NULL || *mode_text == 0) {
+        return;
+    }
+
+    uint32_t mode = (uint32_t)atoi(mode_text);
+    long long address = upim_resolve(set->handle, (char *)"PROBE_MODE", 0);
+
+    for (uint32_t i = first; address >= 0 && i < first + count; i++) {
+        upim_copy_to(set->handle, (int)i, address, &mode, (int)sizeof(mode));
+    }
+}
+
+static void probe_read_counts(struct shim_set *set)
+{
+    static unsigned launches;
+    const char *path = getenv("PROBE_OUT");
+
+    if (path == NULL || *path == 0 || set->probe_count == 0) {
+        return;
+    }
+
+    long long address = upim_resolve(set->handle, (char *)"OUT_COUNT", 0);
+    FILE *out = fopen(path, "a");
+
+    if (out == NULL || address < 0) {
+        if (out != NULL) {
+            fclose(out);
+        }
+        return;
+    }
+
+    launches++;
+    for (uint32_t i = set->probe_first; i < set->probe_first + set->probe_count; i++) {
+        uint32_t value = 0;
+        upim_copy_from(set->handle, (int)i, address, &value, (int)sizeof(value));
+        fprintf(out, "%u\t%u\t%u\n", launches, i - set->probe_first, value);
+    }
+    fclose(out);
+    set->probe_count = 0;
+}
+
 static dpu_error_t run_to_completion(struct shim_set *set)
 {
     if (!set->launched) {
@@ -927,6 +984,7 @@ static dpu_error_t run_to_completion(struct shim_set *set)
     }
 
     set->launched = 0;
+    probe_read_counts(set);
     return DPU_OK;
 }
 
@@ -945,6 +1003,7 @@ dpu_error_t dpu_launch(struct dpu_set_t dpu_set, dpu_launch_policy_t policy)
         first + count - 1);
 
     record_launch(first, count);
+    probe_write_mode(set, first, count);
 
     /* A launch of one rank starts its DPUs only. The others go on as they
      * were, so a host may launch rank by rank and wait for the whole set. */
@@ -953,6 +1012,16 @@ dpu_error_t dpu_launch(struct dpu_set_t dpu_set, dpu_launch_policy_t policy)
 
     if (rc != 0) {
         return fail(DPU_ERR_INTERNAL, "dpu_launch");
+    }
+
+    if (set->probe_count == 0) {
+        set->probe_first = first;
+        set->probe_count = count;
+    } else {
+        uint32_t low = first < set->probe_first ? first : set->probe_first;
+        uint32_t high_old = set->probe_first + set->probe_count, high_new = first + count;
+        set->probe_first = low;
+        set->probe_count = (high_new > high_old ? high_new : high_old) - low;
     }
 
     set->launched = 1;
