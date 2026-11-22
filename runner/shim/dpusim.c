@@ -464,6 +464,91 @@ void dpu_set_rank_iterator_next(struct dpu_set_rank_iterator_t *iterator)
 
 /* ------------------------------------------------------------ transfers --- */
 
+/* UPIM_RECORD=<file> with UPIM_RECORD_DPU=<index> records every copy to that
+ * DPU, every copy from it, and every launch, so runner/scripts/replay_host.c
+ * can run the same DPU's work alone, on the machine and in the simulator.
+ * UPIM_RECORD_DPU may list several indices ("0,50,100"); then UPIM_RECORD
+ * must hold one %u, which becomes the index. A record is a type byte: 'C' a
+ * copy to the DPU, 'R' a copy from it, 'L' a launch. 'C' and 'R' go on with
+ * the symbol name's length, the name, the offset and the length, each number
+ * a uint32_t; 'C' then holds the bytes. */
+#define MAX_RECORDED 16
+
+static int recorded_dpus(long indices[MAX_RECORDED], FILE *files[MAX_RECORDED])
+{
+    static long index_list[MAX_RECORDED];
+    static FILE *file_list[MAX_RECORDED];
+    static int count = -1;
+
+    if (count < 0) {
+        const char *path = getenv("UPIM_RECORD");
+        const char *list = getenv("UPIM_RECORD_DPU");
+        count = 0;
+        if (path != NULL && *path != 0) {
+            char *end;
+            const char *cursor = (list != NULL && *list != 0) ? list : "0";
+            while (count < MAX_RECORDED) {
+                long index = strtol(cursor, &end, 10);
+                char name[4096];
+                if (end == cursor) {
+                    break;
+                }
+                snprintf(name, sizeof(name), path, (unsigned)index);
+                index_list[count] = index;
+                file_list[count] = fopen(name, "wb");
+                count++;
+                if (*end != ',') {
+                    break;
+                }
+                cursor = end + 1;
+            }
+        }
+    }
+    memcpy(indices, index_list, sizeof(index_list));
+    memcpy(files, file_list, sizeof(file_list));
+    return count;
+}
+
+static void record_copy(uint32_t index, const char *symbol_name, uint32_t symbol_offset,
+    const void *buffer, size_t length, int to_dpu)
+{
+    long indices[MAX_RECORDED];
+    FILE *files[MAX_RECORDED];
+    int count = recorded_dpus(indices, files);
+
+    for (int n = 0; n < count; n++) {
+        FILE *file = files[n];
+        if (file == NULL || indices[n] != (long)index) {
+            continue;
+        }
+
+        uint32_t name_length = (uint32_t)strlen(symbol_name);
+        uint32_t fields[2] = { symbol_offset, (uint32_t)length };
+
+        fputc(to_dpu ? 'C' : 'R', file);
+        fwrite(&name_length, sizeof(name_length), 1, file);
+        fwrite(symbol_name, 1, name_length, file);
+        fwrite(fields, sizeof(fields), 1, file);
+        if (to_dpu) {
+            fwrite(buffer, 1, length, file);
+        }
+    }
+}
+
+static void record_launch(uint32_t first, uint32_t count_launched)
+{
+    long indices[MAX_RECORDED];
+    FILE *files[MAX_RECORDED];
+    int count = recorded_dpus(indices, files);
+
+    for (int n = 0; n < count; n++) {
+        if (files[n] != NULL && indices[n] >= (long)first && indices[n] < (long)(first + count_launched)) {
+            fputc('L', files[n]);
+            fflush(files[n]);
+        }
+    }
+}
+
 static dpu_error_t copy_one(struct shim_set *set,
     uint32_t index,
     const char *symbol_name,
@@ -477,6 +562,8 @@ static dpu_error_t copy_one(struct shim_set *set,
     if (address < 0) {
         return fail(DPU_ERR_INVALID_SYMBOL_ACCESS, "resolving a symbol");
     }
+
+    record_copy(index, symbol_name, symbol_offset, buffer, length, to_dpu);
 
     int rc = to_dpu ? upim_copy_to(set->handle, (int)index, address, buffer, (int)length)
                     : upim_copy_from(set->handle, (int)index, address, buffer, (int)length);
@@ -684,6 +771,8 @@ dpu_error_t dpu_launch(struct dpu_set_t dpu_set, dpu_launch_policy_t policy)
     }
 
     trace("dpu_launch: %s", policy == DPU_SYNCHRONOUS ? "synchronous" : "asynchronous");
+
+    record_launch(0, set->nr_dpus);
 
     if (upim_launch(set->handle) != 0) {
         return fail(DPU_ERR_INTERNAL, "dpu_launch");
