@@ -54,7 +54,9 @@ count() {
 # median <reps> <mode> <command...>: the hardware repeats to about 1% on these
 # kernels, which is short work by BIMSA's standard, so one reading is not
 # enough to call a 1% difference. The simulator is exact from run to run and
-# needs no repeats.
+# needs no repeats. It prints the median, then the smallest and largest
+# reading: va at 2 tasklets is bistable on the machine (701.6k to 729.2k over
+# 20 runs), and a median alone hides that.
 median() {
     local reps="$1" mode="$2"; shift 2
     local i vals
@@ -65,7 +67,9 @@ median() {
         [ "$v" = FAIL ] && { echo FAIL; return; }
         vals="$vals$v\n"
     done
-    printf "$vals" | sort -n | awk -v n="$reps" 'NR == int((n+1)/2) {print; exit}'
+    printf "$vals" | sort -n | awk -v n="$reps" '
+        NR == 1 {lo = $1} NR == int((n+1)/2) {med = $1} {hi = $1}
+        END {print med, lo, hi}'
 }
 
 for k in $kernels; do
@@ -76,8 +80,8 @@ for k in $kernels; do
 
     echo
     echo "$k, $elems elements, 1 DPU"
-    printf '%-9s %14s %14s %9s %14s %14s %9s\n' \
-        tasklets "cycles hw" "cycles sim" "error" "instr hw" "instr sim" "error"
+    printf '%-9s %14s %14s %9s %14s %14s %9s  %s\n' \
+        tasklets "cycles hw" "cycles sim" "error" "instr hw" "instr sim" "error" "hw cycles min..max"
 
     for t in $tasklets; do
         dpu-upmem-dpurte-clang $flags -DNR_TASKLETS="$t" \
@@ -104,13 +108,13 @@ for k in $kernels; do
                 -- "$work/${k}_host"
         }
 
-            hc=$(median "$reps" 0 hw); hi=$(median "$reps" 1 hw)
+            read -r hc hlo hhi <<<"$(median "$reps" 0 hw)"; read -r hi _ _ <<<"$(median "$reps" 1 hw)"
         sc=$(count 0 sim); si=$(count 1 sim)
 
-        awk -v t="$t" -v hc="$hc" -v sc="$sc" -v hi="$hi" -v si="$si" 'BEGIN{
+        awk -v t="$t" -v hc="$hc" -v sc="$sc" -v hi="$hi" -v si="$si" -v lo="$hlo" -v up="$hhi" 'BEGIN{
             ce = (hc+0 > 0 && sc != "FAIL") ? sprintf("%+.2f%%", 100*(sc-hc)/hc) : "-"
             ie = (hi+0 > 0 && si != "FAIL") ? sprintf("%+.2f%%", 100*(si-hi)/hi) : "-"
-            printf "%-9s %14s %14s %9s %14s %14s %9s\n", t, hc, sc, ce, hi, si, ie
+            printf "%-9s %14s %14s %9s %14s %14s %9s  %s..%s\n", t, hc, sc, ce, hi, si, ie, lo, up
         }'
     done
 done

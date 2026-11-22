@@ -538,6 +538,29 @@ workload whose threads share the memory lightly can be a few percent off in
 either direction, and which direction depends on details nobody has measured
 yet.
 
+## 2026-09-29 — The machine does not always do the same thing
+
+The vector addition at 2 threads was 3.4% fast in the simulator, and I set out
+to find which pairs of threads the machine keeps in step and which it lets
+drift apart.
+
+I measured three explanations and none of them held. A memory transfer does
+not slow another thread's accesses to local memory. Starting a transfer
+earlier in the pipeline changes nothing. Holding the memory refresh until no
+transfer is running keeps the pair in step, but it also keeps pairs in step
+that the machine separates in other tests.
+
+Then I ran the same program on the machine twenty times instead of five. It
+does not always give the same answer. Thirteen runs keep the two threads in
+step; seven let them drift apart, and those are as fast as the simulator. The
+median of five had always happened to land on the first kind. The simulator
+was not wrong about the mechanism. It lands in the machine's less common
+state.
+
+The lesson is about the measuring, not the model. A median hides a program
+that can end up in two different states. The test now prints the fastest and
+slowest run beside the median, so the next such case shows at once.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.
