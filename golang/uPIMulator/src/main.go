@@ -202,6 +202,36 @@ func InitCommandLineParser() *misc.CommandLineParser {
 	)
 	command_line_parser.AddOption(
 		misc.INT,
+		"mram_refresh_interval",
+		"2736",
+		"logic cycles between two MRAM refreshes; 0 models none [logic cycle]",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
+		"mram_refresh_cycles",
+		"120",
+		"logic cycles one MRAM refresh keeps the memory unavailable [logic cycle]",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
+		"mram_refresh_mode",
+		"0",
+		"0 refreshes MRAM on its schedule whatever runs, 1 waits for no transfer in progress",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
+		"mram_refresh_phase",
+		"0",
+		"logic cycles the refresh schedule is shifted by [logic cycle]",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
+		"dma_policy",
+		"0",
+		"which waiting transfer the DMA engine starts next: 0 the oldest, 1 the lowest-numbered thread's",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
 		"dma_burst_size",
 		"1024",
 		"largest transfer the DPU DMA engine sets up in one go [byte]",

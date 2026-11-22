@@ -5340,7 +5340,7 @@ func (this *Logic) ExecuteLdmaDmaRri(instruction_ *instruction.Instruction) {
 
 	size := (1 + this.alu.And(imm+this.alu.And(this.alu.Lsr(ra, 24), 255), 255)) * this.min_access_granularity
 
-	this.dma.TransferFromMramToWram(wram_address, mram_address, size, instruction_)
+	this.dma.TransferFromMramToWram(wram_address, mram_address, size, instruction_, thread.ThreadId())
 
 	thread.RegFile().ClearConditions()
 }
@@ -5380,7 +5380,7 @@ func (this *Logic) ExecuteSdmaDmaRri(instruction_ *instruction.Instruction) {
 
 	size := (1 + this.alu.And(imm+this.alu.And(this.alu.Lsr(ra, 24), 255), 255)) * this.min_access_granularity
 
-	this.dma.TransferFromWramToMram(wram_address, mram_address, size, instruction_)
+	this.dma.TransferFromWramToMram(wram_address, mram_address, size, instruction_, thread.ThreadId())
 
 	thread.RegFile().ClearConditions()
 }

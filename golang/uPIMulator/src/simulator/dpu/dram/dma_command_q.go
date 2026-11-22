@@ -128,6 +128,25 @@ func (this *DmaCommandQ) Cycle() {
 // That is the difference between a queue whose timer is an issue interval and
 // one whose timer is a latency every entry serves at the same time. Cycle is
 // the interval; this is the latency.
+// PromoteLowestThread moves the command of the lowest-numbered thread to the
+// front, with its timer, and keeps the order of the others.
+func (this *DmaCommandQ) PromoteLowestThread() {
+	best := 0
+	for i := range this.dma_commands {
+		if this.dma_commands[i].ThreadId() < this.dma_commands[best].ThreadId() {
+			best = i
+		}
+	}
+	if best == 0 {
+		return
+	}
+
+	command, cycle := this.dma_commands[best], this.cycles[best]
+	copy(this.dma_commands[1:best+1], this.dma_commands[0:best])
+	copy(this.cycles[1:best+1], this.cycles[0:best])
+	this.dma_commands[0], this.cycles[0] = command, cycle
+}
+
 func (this *DmaCommandQ) CycleAll() {
 	for i := range this.cycles {
 		this.cycles[i] -= 1

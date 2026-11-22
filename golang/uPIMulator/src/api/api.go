@@ -76,6 +76,17 @@ type Config struct {
 	// before it. Reads alone or writes alone never pay it.
 	DmaTurnaroundCycles int
 
+	// MRAM refresh: every MramRefreshInterval logic cycles the memory is
+	// unavailable for MramRefreshCycles. Zero models none.
+	MramRefreshInterval int
+	MramRefreshCycles   int
+	MramRefreshPhase    int
+	MramRefreshMode     int
+
+	// Which waiting transfer the DMA engine starts next: 0 the oldest, 1 the
+	// lowest-numbered thread's.
+	DmaPolicy int
+
 	ReadBandwidth  int
 	WriteBandwidth int
 
@@ -154,6 +165,11 @@ func DefaultConfig() Config {
 		DmaWriteStartupCycles: 24,
 		DmaWriteAckCycles:     9,
 		DmaTurnaroundCycles:   2,
+		// Every 7.8 us at 350 MHz, for about 120 cycles: measured one transfer
+		// at a time by runner/tests/perf/trace_kernel.c.
+		MramRefreshInterval: 2736,
+		MramRefreshCycles:   120,
+		DmaPolicy:           0,
 
 		ReadBandwidth:  1,
 		WriteBandwidth: 3,
@@ -612,6 +628,11 @@ func (this Config) toCommandLineParser() *misc.CommandLineParser {
 	add_int("dma_write_startup_cycles", this.DmaWriteStartupCycles)
 	add_int("dma_write_ack_cycles", this.DmaWriteAckCycles)
 	add_int("dma_turnaround_cycles", this.DmaTurnaroundCycles)
+	add_int("mram_refresh_interval", this.MramRefreshInterval)
+	add_int("mram_refresh_cycles", this.MramRefreshCycles)
+	add_int("mram_refresh_phase", this.MramRefreshPhase)
+	add_int("mram_refresh_mode", this.MramRefreshMode)
+	add_int("dma_policy", this.DmaPolicy)
 	add_int("read_bandwidth", this.ReadBandwidth)
 	add_int("write_bandwidth", this.WriteBandwidth)
 

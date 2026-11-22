@@ -48,6 +48,13 @@ type Dma struct {
 	last_op     dram.MemoryOperation
 	has_last_op bool
 	switch_paid bool
+
+	// policy picks the next transfer when the engine is free to start one:
+	// 0 serves them in the order they came, 1 serves the lowest-numbered
+	// thread first. front_started is set once the chosen transfer's setup
+	// has begun; a started setup is never preempted.
+	policy        int64
+	front_started bool
 }
 
 func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
@@ -74,6 +81,8 @@ func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
 	this.turnaround = command_line_parser.IntParameter("dma_turnaround_cycles")
 	this.has_last_op = false
 	this.switch_paid = false
+	this.policy = command_line_parser.IntParameter("dma_policy")
+	this.front_started = false
 	this.busy = 0
 
 	this.input_q = new(dram.DmaCommandQ)
@@ -188,6 +197,7 @@ func (this *Dma) TransferFromWramToMram(
 	mram_address int64,
 	size int64,
 	instruction_ *instruction.Instruction,
+	thread_id int,
 ) {
 	if !this.CanPush() {
 		err := errors.New("DMA cannot be pushed")
@@ -198,6 +208,7 @@ func (this *Dma) TransferFromWramToMram(
 
 	dma_command := new(dram.DmaCommand)
 	dma_command.InitWriteToMramFromWram(wram_address, mram_address, size, byte_stream, instruction_)
+	dma_command.SetThreadId(thread_id)
 
 	this.Push(dma_command)
 }
@@ -207,6 +218,7 @@ func (this *Dma) TransferFromMramToWram(
 	mram_address int64,
 	size int64,
 	instruction_ *instruction.Instruction,
+	thread_id int,
 ) {
 	if !this.CanPush() {
 		err := errors.New("DMA cannot be pushed")
@@ -215,6 +227,7 @@ func (this *Dma) TransferFromMramToWram(
 
 	dma_command := new(dram.DmaCommand)
 	dma_command.InitReadFromMramToWram(wram_address, mram_address, size, instruction_)
+	dma_command.SetThreadId(thread_id)
 
 	this.Push(dma_command)
 }
@@ -275,10 +288,17 @@ func (this *Dma) Cycle() {
 	if this.busy > 0 {
 		this.busy--
 	} else if this.memory_controller.IsEmpty() {
+		if !this.front_started && this.policy == 1 && !this.input_q.IsEmpty() {
+			this.input_q.PromoteLowestThread()
+		}
 		if this.NeedsTurnaround() {
 			this.busy = this.turnaround
 			this.switch_paid = true
+			this.front_started = true
 		} else {
+			if !this.input_q.IsEmpty() {
+				this.front_started = true
+			}
 			this.input_q.Cycle()
 		}
 	}
@@ -295,6 +315,7 @@ func (this *Dma) ServiceInputQ() {
 		this.last_op = dma_command.MemoryOperation()
 		this.has_last_op = true
 		this.switch_paid = false
+		this.front_started = false
 	}
 }
 

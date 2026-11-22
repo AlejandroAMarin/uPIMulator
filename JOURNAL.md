@@ -509,6 +509,35 @@ are within 0.4%. They run at the same time on the same hardware, so how the
 time splits between them depends on everything else that is happening. BIMSA
 is inside 0.6% at every tasklet count and every section of it inside 0.5%.
 
+## 2026-09-28 — Memory refresh, and threads that queue together
+
+PrIM's vector addition was 2% slow at 16 threads. That turned out to be the
+start and the end of a short run, and it disappears on a larger input. But the
+larger input showed something worse: at 4 and 8 threads the simulator was up
+to 4.4% slow.
+
+A trace of every transfer showed why. Two threads had fallen into step: each
+time, one thread's read arrived just before the other's write, so each waited
+for the other in every iteration, and neither ever got out. The same trace on
+the machine showed the same pairs forming, and then breaking up after ten or
+twenty iterations.
+
+Something on the machine shakes the threads apart. It is memory refresh: every
+7.8 microseconds the memory stops for about a third of a microsecond. I had
+seen it before only as an average cost. Measured one transfer at a time, it is
+large and rare, and that is what disturbs the threads enough to separate them.
+The simulator now models it, and the vector addition on large inputs is within
+2.3%.
+
+It does not settle everything. At 2 threads the machine keeps a pair in step
+that the simulator now breaks, and that case went from exact to 3.4% fast.
+Which pairs last depends on how the memory engine chooses between waiting
+threads, and that is the next thing to measure. On balance the model is closer
+than before, but the step is smaller than the numbers above it suggest: a
+workload whose threads share the memory lightly can be a few percent off in
+either direction, and which direction depends on details nobody has measured
+yet.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.

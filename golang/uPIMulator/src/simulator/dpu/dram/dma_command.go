@@ -16,6 +16,17 @@ type DmaCommand struct {
 	acks        []bool
 
 	instruction *instruction.Instruction
+
+	// The thread that issued the transfer, or -1 for one the host made.
+	thread_id int
+}
+
+func (this *DmaCommand) SetThreadId(thread_id int) {
+	this.thread_id = thread_id
+}
+
+func (this *DmaCommand) ThreadId() int {
+	return this.thread_id
 }
 
 func (this *DmaCommand) InitReadFromMram(mram_address int64, size int64) {
@@ -39,6 +50,7 @@ func (this *DmaCommand) InitReadFromMram(mram_address int64, size int64) {
 	}
 
 	this.instruction = nil
+	this.thread_id = -1
 }
 
 func (this *DmaCommand) InitWriteToMram(
@@ -61,6 +73,7 @@ func (this *DmaCommand) InitWriteToMram(
 	}
 
 	this.instruction = nil
+	this.thread_id = -1
 }
 
 func (this *DmaCommand) InitReadFromMramToWram(
@@ -96,6 +109,7 @@ func (this *DmaCommand) InitReadFromMramToWram(
 	}
 
 	this.instruction = instruction_
+	this.thread_id = -1
 }
 
 func (this *DmaCommand) InitWriteToMramFromWram(
@@ -127,6 +141,7 @@ func (this *DmaCommand) InitWriteToMramFromWram(
 	}
 
 	this.instruction = instruction_
+	this.thread_id = -1
 }
 
 func (this *DmaCommand) Fini() {
