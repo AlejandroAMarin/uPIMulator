@@ -55,11 +55,22 @@ type Config struct {
 	TBl  int
 
 	// Logic cycles a DMA waits before its first byte reaches the memory
-	// controller: the DMA engine's own startup, which the DRAM timings above
-	// do not describe. Measured at about 40 cycles on this machine, the same
-	// whatever the transfer's size.
+	// controller: the DMA engine's own setup, which the DRAM timings above
+	// do not describe. Charged once for every DmaBurstSize row a transfer
+	// touches, whatever it holds.
 	DmaStartupCycles int
 	DmaBurstSize     int
+
+	// Logic cycles the DMA engine stays busy after it wakes the thread, before
+	// it can start the next transfer. Hidden when the engine is idle, paid on
+	// every transfer when it is saturated.
+	DmaTailCycles      int
+	DmaTailCyclesPerKb int
+
+	// A write's setup, and the delay between the engine finishing a write and
+	// the thread waking. The engine is free during the delay.
+	DmaWriteStartupCycles int
+	DmaWriteAckCycles     int
 
 	ReadBandwidth  int
 	WriteBandwidth int
@@ -112,17 +123,32 @@ func DefaultConfig() Config {
 		WordlineSize:         1024,
 		MinAccessGranularity: 8,
 
-		TRcd: 32,
-		TRas: 78,
-		TRp:  32,
-		// 22, not the 32 upstream assumed. MRAM has no datasheet to read this
-		// off, and 32 made a 2 KB mram_read 23% slower than the machine.
-		// Measured by runner/tests/perf/mram_kernel.c.
-		TCl: 25,
+		// Zero, not upstream's 32/78/32. The machine shows no cost for a read
+		// that opens a different row from the one before it; the engine's
+		// setup, paid for every row a transfer touches, covers the activation.
+		// Measured by runner/tests/perf/scatter_kernel.c.
+		TRcd: 0,
+		TRas: 0,
+		TRp:  0,
+		// 23, not the 32 upstream assumed. MRAM has no datasheet to read this
+		// off. With an idle engine the machine moves 0.4985 cycles a byte (a
+		// read's latency is 242.5 + 0.4985 x size cycles in
+		// runner/tests/perf/refresh_kernel.c); the busy engine's 0.545 is
+		// this plus DmaTailCyclesPerKb plus the time refresh takes.
+		TCl: 23,
 		TBl: 8,
 
-		DmaStartupCycles: 26,
-		DmaBurstSize:     1024,
+		// Fitted together against scatter_kernel.c (8 B to 2 KB, 1 to 16
+		// tasklets), mix_kernel.c, the read-tail staircase of
+		// runner/tests/perf/stair_kernel.c and six GIMSA DPUs replayed alone.
+		// See "Small reads, and the DMA engine idle and busy" and "A read's
+		// latency, and refresh lock-in" in runner/tests/perf/README.md.
+		DmaStartupCycles:      32,
+		DmaBurstSize:          1024,
+		DmaTailCycles:         2,
+		DmaTailCyclesPerKb:    25,
+		DmaWriteStartupCycles: 24,
+		DmaWriteAckCycles:     9,
 
 		ReadBandwidth:  1,
 		WriteBandwidth: 3,
@@ -576,6 +602,10 @@ func (this Config) toCommandLineParser() *misc.CommandLineParser {
 	add_int("t_bl", this.TBl)
 	add_int("dma_startup_cycles", this.DmaStartupCycles)
 	add_int("dma_burst_size", this.DmaBurstSize)
+	add_int("dma_tail_cycles", this.DmaTailCycles)
+	add_int("dma_tail_cycles_per_kb", this.DmaTailCyclesPerKb)
+	add_int("dma_write_startup_cycles", this.DmaWriteStartupCycles)
+	add_int("dma_write_ack_cycles", this.DmaWriteAckCycles)
 	add_int("read_bandwidth", this.ReadBandwidth)
 	add_int("write_bandwidth", this.WriteBandwidth)
 

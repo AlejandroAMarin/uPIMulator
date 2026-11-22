@@ -454,6 +454,43 @@ What is left in a small read is now measured. At one tasklet the simulator is
 6% to 8% fast; with the memory engine busy it is 5% slow. One fixed cost per
 read cannot be right in both cases. That is the next task.
 
+## 2026-09-28 — The memory engine, idle and busy
+
+After the register fix, one error was left in small reads: at one tasklet the
+simulator was 6% to 9% fast, and with the memory engine saturated it was 5%
+slow. One fixed cost per read could not be right in both cases.
+
+A finer probe found four separate things, and each needed its own change:
+
+- **No cost for changing rows.** The simulator charged about 11 cycles when a
+  read opened a different part of memory from the one before it. The machine
+  charges nothing. That charge is gone.
+- **The engine sets up once for each 1 KB block a transfer touches.** A read at
+  a random address sometimes crosses a block boundary and pays twice. The
+  machine's extra cost matched that rule to a fraction of a cycle at every
+  size. The simulator counted by size instead.
+- **The machine wakes the thread before the engine is finished.** So a thread
+  waiting alone sees a faster engine than a queue of threads does. The model
+  now keeps the engine busy for a short time after each transfer, and a thread
+  spends one more issue slot when its read completes. Writes behave
+  differently again, and have their own two numbers.
+- **Memory refresh is visible.** Every 3.9 microseconds the memory is
+  unavailable for about 170 nanoseconds. A loop whose period is a simple
+  fraction of that locks to it and slows down. This is not modelled; its
+  average cost is in the fitted numbers.
+
+One mistake on the way is worth recording. A loop's instruction count looked
+one too high for each read, and I took that as evidence that the machine
+executes each read instruction twice. A second probe, whose loop I could count
+by hand, showed no such thing. I had miscounted the first loop. The change it
+suggested survived on other evidence, but only just.
+
+**Result.** BIMSA is now inside 0.6% at every tasklet count, and every section
+of it inside 0.7%. GIMSA's binary search is +0.6%. Memory throughput, which had
+a flat 1.6% error that the old model could not express, is inside 0.8%. One
+number got worse: GIMSA's table lookup, from +0.2% to -1.2%. That is the next
+thing to look at.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.

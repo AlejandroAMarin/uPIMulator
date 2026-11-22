@@ -20,6 +20,25 @@ type Dma struct {
 
 	startup    int64
 	burst_size int64
+
+	// tail is how long the engine stays busy after it hands a finished
+	// transfer back, plus tail_per_kb for each KB the transfer moved; busy
+	// counts it down. The machine wakes the thread before the engine is done
+	// with a transfer: with the engine idle a thread sees about 0.50 cycles a
+	// byte, and with it saturated each transfer costs about 0.545. The tail
+	// is the difference, hidden when the engine is idle and paid in full when
+	// it is not.
+	tail        int64
+	tail_per_kb int64
+	busy        int64
+
+	// A write sets up faster than a read, and its completion reaches the
+	// thread write_ack cycles after the engine is done with it. The engine is
+	// free during that time. On the machine a saturated 8-byte write costs
+	// about 33 cycles against a read's 43, while a thread waits for one about
+	// as long as for a read, less the slot a read spends when it completes.
+	write_startup int64
+	write_ack     int64
 }
 
 func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
@@ -34,11 +53,16 @@ func (this *Dma) Init(command_line_parser *misc.CommandLineParser) {
 	max_num_tasklets := config_loader.MaxNumTasklets()
 
 	// The DMA engine's own startup, in logic cycles, before a transfer reaches
-	// the memory controller. The machine charges it once per burst, whatever
-	// the burst holds, and it does not overlap the transfer before it.
-	// runner/tests/perf/mram_tasklet_sweep.sh measures both terms.
+	// the memory controller. The machine charges it once for every row the
+	// transfer touches, whatever the row holds, and it does not overlap the
+	// transfer before it. runner/tests/perf/scatter_kernel.c measures it.
 	this.startup = command_line_parser.IntParameter("dma_startup_cycles")
 	this.burst_size = command_line_parser.IntParameter("dma_burst_size")
+	this.tail = command_line_parser.IntParameter("dma_tail_cycles")
+	this.tail_per_kb = command_line_parser.IntParameter("dma_tail_cycles_per_kb")
+	this.write_startup = command_line_parser.IntParameter("dma_write_startup_cycles")
+	this.write_ack = command_line_parser.IntParameter("dma_write_ack_cycles")
+	this.busy = 0
 
 	this.input_q = new(dram.DmaCommandQ)
 	this.input_q.Init(max_num_tasklets, this.startup)
@@ -193,15 +217,23 @@ func (this *Dma) Push(dma_command *dram.DmaCommand) {
 		panic(err)
 	}
 
-	// One startup per burst, rounded up. The machine charges a 2 KB transfer
-	// two startups and a 1 KB one only a single startup, with nothing else
-	// between them but the bytes.
-	bursts := (dma_command.Size() + this.burst_size - 1) / this.burst_size
+	// The engine sets up once for each burst_size-aligned row the transfer
+	// touches, not once per burst_size bytes: a 1 KB read at a random address
+	// usually spans two rows and costs the setup twice, and a 2 KB one spans
+	// three. Measured by runner/tests/perf/scatter_kernel.c.
+	first := dma_command.MramAddress() / this.burst_size
+	last := (dma_command.MramAddress() + dma_command.Size() - 1) / this.burst_size
+	bursts := last - first + 1
 	if bursts < 1 {
 		bursts = 1
 	}
 
-	this.input_q.PushWithTimer(dma_command, this.startup*bursts)
+	startup := this.startup
+	if dma_command.MemoryOperation() == dram.WRITE {
+		startup = this.write_startup
+	}
+
+	this.input_q.PushWithTimer(dma_command, startup*bursts)
 }
 
 func (this *Dma) CanPop() bool {
@@ -226,8 +258,11 @@ func (this *Dma) Cycle() {
 	// overlap, which is why the machine's cost per transfer is the sum of the
 	// two terms and not the larger of them. So the startup only counts down
 	// while the memory controller is idle, and only the transfer at the front
-	// counts at all.
-	if this.memory_controller.IsEmpty() {
+	// counts at all. After a transfer the engine stays busy for its tail
+	// before the next setup can start.
+	if this.busy > 0 {
+		this.busy--
+	} else if this.memory_controller.IsEmpty() {
 		this.input_q.Cycle()
 	}
 
@@ -235,8 +270,8 @@ func (this *Dma) Cycle() {
 }
 
 func (this *Dma) ServiceInputQ() {
-	if this.input_q.CanPop(1) && this.memory_controller.IsEmpty() &&
-		this.memory_controller.CanPush() {
+	if this.input_q.CanPop(1) && this.busy == 0 &&
+		this.memory_controller.IsEmpty() && this.memory_controller.CanPush() {
 		dma_command := this.input_q.Pop()
 		this.memory_controller.Push(dma_command)
 	}
@@ -245,7 +280,12 @@ func (this *Dma) ServiceInputQ() {
 func (this *Dma) ServiceReadyQ() {
 	if this.memory_controller.CanPop() && this.ready_q.CanPush(1) {
 		dma_command := this.memory_controller.Pop()
-		this.ready_q.Push(dma_command)
+		if dma_command.MemoryOperation() == dram.WRITE {
+			this.ready_q.PushWithTimer(dma_command, this.write_ack)
+		} else {
+			this.ready_q.Push(dma_command)
+		}
+		this.busy = this.tail + (dma_command.Size()*this.tail_per_kb+512)/1024
 
 		if dma_command.MemoryOperation() == dram.READ {
 			wram_address := dma_command.WramAddress()

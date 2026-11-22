@@ -152,23 +152,47 @@ func InitCommandLineParser() *misc.CommandLineParser {
 	command_line_parser.AddOption(
 		misc.INT,
 		"t_rcd",
-		"32",
+		"0",
 		"DPU MRAM t_rcd timing parameter [cycle]",
 	)
 	command_line_parser.AddOption(
 		misc.INT,
 		"t_ras",
-		"78",
+		"0",
 		"DPU MRAM t_ras timing parameter [cycle]",
 	)
-	command_line_parser.AddOption(misc.INT, "t_rp", "32", "DPU MRAM t_rp timing parameter [cycle]")
-	command_line_parser.AddOption(misc.INT, "t_cl", "25", "DPU MRAM t_cl timing parameter [cycle]")
+	command_line_parser.AddOption(misc.INT, "t_rp", "0", "DPU MRAM t_rp timing parameter [cycle]")
+	command_line_parser.AddOption(misc.INT, "t_cl", "23", "DPU MRAM t_cl timing parameter [cycle]")
 	command_line_parser.AddOption(misc.INT, "t_bl", "8", "DPU MRAM t_bl timing parameter [cycle]")
 	command_line_parser.AddOption(
 		misc.INT,
 		"dma_startup_cycles",
-		"26",
-		"DPU DMA engine startup, charged once per burst [logic cycle]",
+		"32",
+		"DPU DMA engine setup, charged once for every dma_burst_size row a transfer touches [logic cycle]",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
+		"dma_tail_cycles",
+		"2",
+		"DPU DMA engine busy time after it wakes the thread, before the next transfer [logic cycle]",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
+		"dma_tail_cycles_per_kb",
+		"25",
+		"further DPU DMA engine busy time after it wakes the thread, per KB transferred [logic cycle]",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
+		"dma_write_startup_cycles",
+		"24",
+		"DPU DMA engine setup for a write, charged like dma_startup_cycles [logic cycle]",
+	)
+	command_line_parser.AddOption(
+		misc.INT,
+		"dma_write_ack_cycles",
+		"9",
+		"delay between the DMA engine finishing a write and the thread waking; the engine is free [logic cycle]",
 	)
 	command_line_parser.AddOption(
 		misc.INT,
