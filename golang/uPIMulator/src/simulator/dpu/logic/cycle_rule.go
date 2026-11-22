@@ -7,8 +7,9 @@ import (
 	"uPIMulator/src/misc"
 )
 
-// REG_BANK_PORTS is how many of one instruction's registers a single bank of
-// the register file serves in a cycle.
+// REG_BANK_PORTS is how many registers a single bank of the register file
+// serves in a cycle: the ones an instruction reads, together with the one the
+// thread's previous instruction writes.
 const REG_BANK_PORTS = 2
 
 type CycleRule struct {
@@ -22,6 +23,10 @@ type CycleRule struct {
 
 	scoreboard map[*instruction.Instruction]*Thread
 	reg_sets   []*RegSet
+
+	// The instruction each thread issued last. Its destination occupies a
+	// bank port while the thread's next instruction reads its sources.
+	prev_instructions []*instruction.Instruction
 
 	stat_factory *misc.StatFactory
 }
@@ -66,6 +71,7 @@ func (this *CycleRule) Init(
 
 		this.reg_sets = append(this.reg_sets, reg_set)
 	}
+	this.prev_instructions = make([]*instruction.Instruction, num_tasklets)
 
 	name := fmt.Sprintf("CycleRule[%d_%d_%d]", channel_id, rank_id, dpu_id)
 	this.stat_factory = new(misc.StatFactory)
@@ -144,25 +150,34 @@ func (this *CycleRule) ServiceWaitQ() {
 }
 
 // ConflictTurns is how many extra issue slots one instruction loses to the
-// register file. The file has an even bank and an odd bank, and each serves at
-// most two of an instruction's registers in a cycle, counting its destination
-// with its two sources. Three registers of one parity therefore need a second
-// slot.
+// register file, and it must be called once for each instruction a thread
+// issues, in order. The file has an even bank and an odd bank, and each serves
+// at most two registers in a cycle. Those two ports are shared between the
+// registers this instruction reads and the register the thread's previous
+// instruction writes. This instruction's own destination does not count. So
+// three distinct registers of one parity, counted that way, need a second slot.
 //
 // Measured on this machine, at one tasklet where a lost slot is 11 unmistakable
-// cycles (runner/tests/perf/regbank_kernel.c):
+// cycles, with eight copies of the instruction and the loop's own
+// `add r0, r0, -1, nz` in an iteration (runner/tests/perf/regbank_kernel.c):
 //
-//	add r4, r6, r8  three even        20.8 cycles/instruction, so one slot lost
-//	add r5, r7, r9  three odd         19.6
-//	add r5, r4, r6  two even read     11.0, nothing lost
-//	add r6, r7, r9  two odd read      11.0
-//	add r4, r5, r6  one of each       11.0
+//	add r4, r6, r8  reads 2 even after an even write  20.80, all 8 lose a slot
+//	add r5, r7, r9  reads 2 odd after an odd write    19.58, 7 of 8: the first
+//	                                                   follows r0, which is even
+//	add r5, r4, r6  reads 2 even after an odd write   12.24, 1 of 8: the first
+//	add r6, r7, r9  reads 2 odd after an even write   11.02, none
+//	add r4, r5, r6  one of each                        11.02, none
 //
-// uPIMulator used to count this instruction's sources together with the
-// register the instruction BEFORE it wrote, and to charge floor(even/2) +
-// floor(odd/2). That fired on pairs the machine serves for free -- a third of
-// every instruction in a plain loop -- and it held the whole DPU's pipeline
-// rather than the thread, so a single tasklet never paid it at all.
+// and in runner/tests/perf/pipe_kernel.c, `add r8, r8, r10` loses a slot after
+// `add r4, r4, 1` and none after itself, because r8 is then one register.
+//
+// uPIMulator used to count this instruction's destination with its sources.
+// That gets the first three right and the next two wrong, and it misses every
+// case where the previous instruction's write is the third register -- the
+// loop's own counter update in front of a two-source instruction is the usual
+// one. Before that it charged floor(even/2) + floor(odd/2), which fired on
+// pairs the machine serves for free, and held the whole DPU's pipeline rather
+// than the thread.
 func (this *CycleRule) ConflictTurns(
 	instruction_ *instruction.Instruction,
 	thread_id int,
@@ -175,8 +190,11 @@ func (this *CycleRule) ConflictTurns(
 	}
 
 	reg_set.Clear()
+	if prev := this.prev_instructions[thread_id]; prev != nil {
+		reg_set.CollectWriteGpRegs(prev)
+	}
 	reg_set.CollectReadGpRegs(instruction_)
-	reg_set.CollectWriteGpRegs(instruction_)
+	this.prev_instructions[thread_id] = instruction_
 
 	even_counter := 0
 	odd_counter := 0

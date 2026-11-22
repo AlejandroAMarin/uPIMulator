@@ -408,6 +408,52 @@ the programs that read in long runs, so that is not what is missing. Something
 that costs more when consecutive reads land far apart would fit all of it. That
 is the next thing to test.
 
+## 2026-09-26 — The scattered reads were never the problem
+
+Two programs were about 3.5% fast in the simulator, and both make small reads
+at scattered addresses. The plan was to test a charge for reads that land far
+apart in memory.
+
+**The machine charges nothing for that.** A new probe reads small blocks in
+order, far apart, and at random places in 32 MB. On the machine all of these
+cost the same. The simulator is the one that charges extra for a distant read,
+and it charges too much. That makes it slower, not faster, so it could not be
+the cause.
+
+**The cause was in the loop, not in the read.** The same loop with the read
+taken out was still fast in the simulator, by one cycle in every iteration.
+Cutting the loop down one instruction at a time found the pair that did it: a
+loop counter increment followed by an addition of two registers.
+
+The register file has two banks and each bank can serve two registers at a
+time. What counts is the registers an instruction reads and the register the
+instruction before it writes. The simulator counted the instruction's own
+result instead. That is wrong in exactly the case a compiled loop produces all
+the time. The original authors had counted the right registers; an earlier fix
+here corrected how the conflict was charged and changed the registers too, and
+that second part was the mistake.
+
+With the rule corrected, 35 register layouts agree with the machine within
+0.34%, and:
+
+| program | before | after |
+|---|---|---|
+| BIMSA, whole kernel, 1-16 tasklets | +1.5% to +2.1% | -0.6% to -1.3% |
+| BIMSA, `extend` | -3.2% | -0.7% |
+| GIMSA, binary search | -3.6% | -1.1% |
+| PrIM's two kernels | unchanged | |
+
+**The lesson is the same as before, from the other side.** Two unrelated
+programs agreed on the size and sign of an error, and that looked like strong
+evidence that the error was in what they had in common, the memory reads. It
+was in something else they had in common: short loops. Agreement between
+workloads narrows the cause, but it does not name it. Only a probe that takes
+one thing away at a time does that.
+
+What is left in a small read is now measured. At one tasklet the simulator is
+6% to 8% fast; with the memory engine busy it is 5% slow. One fixed cost per
+read cannot be right in both cases. That is the next task.
+
 ## Accuracy, then and now
 
 BIMSA on one DPU, simulator against hardware. Lower is better.
